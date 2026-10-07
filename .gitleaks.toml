@@ -1,0 +1,38 @@
+title = "Shredit public repository secret checks"
+
+[extend]
+useDefault = true
+
+# Narrow, reviewed synthetic/source-only matches. Never allowlist a directory
+# wholesale or a production secret. A changed value must be reviewed again.
+[[allowlists]]
+description = "Public generated-password alphabet, not a generated password"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^lib/crypto/password\.ts$''']
+regexTarget = "match"
+regexes = ['''GENERATED_PASSWORD_ALPHABET\s*=\s*"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789-_"''']
+
+[[allowlists]]
+description = "Fixed synthetic ingress-token fixture in two regression tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/(?:env|request-context)\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^c2hyZWRpdC1pbmdyZXNzLXRlc3QtdG9rZW4tMDAwMDE$''']
+
+[[allowlists]]
+description = "Human-readable synthetic idempotency fixture in environment tests"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^tests/env\.test\.ts$''']
+regexTarget = "secret"
+regexes = ['''^idempotency-0123456789abcdef-unique$''']
+
+[[allowlists]]
+description = "Empty specification env field followed by a public variable name"
+targetRules = ["generic-api-key"]
+condition = "AND"
+paths = ['''^SHREDIT_PROJECT_SPEC\.md$''']
+regexTarget = "match"
+regexes = ['''IDEMPOTENCY_HMAC_SECRET=\r?\nIDEMPOTENCY_TOMBSTONE_RETENTION_DAYS=''']

@@ -1,0 +1,30 @@
+#!/bin/sh
+set -eu
+expected_url=$(git config --local --get shredit.publicRemote || true)
+expected_branch=$(git config --local --get shredit.publicBranch || true)
+scanner=$(git config --local --get shredit.gitleaksPath || true)
+if [ -z "$scanner" ] && command -v gitleaks >/dev/null 2>&1; then
+  scanner=gitleaks
+fi
+if [ -z "$scanner" ] && [ "$(git config --local --get shredit.requireGitleaks || true)" = "true" ]; then
+  echo "Push blocked: the required independent secret scanner is unavailable." >&2
+  exit 1
+fi
+if [ -n "$expected_url" ] && [ "$2" != "$expected_url" ]; then
+  echo "Push blocked: remote is not the approved public repository." >&2
+  exit 1
+fi
+while read -r local_ref local_oid remote_ref remote_oid; do
+  if [ -n "$expected_branch" ] && { [ "$local_ref" != "refs/heads/$expected_branch" ] || [ "$remote_ref" != "refs/heads/$expected_branch" ]; }; then
+    echo "Push blocked: only the approved branch may be published; no old branches or tags." >&2
+    exit 1
+  fi
+  if [ "$local_ref" = "(delete)" ]; then
+    echo "Push blocked: branch deletion requires a separate operator action." >&2
+    exit 1
+  fi
+  node scripts/check-public-repository.mjs --history --ref "$local_oid"
+  if [ -n "$scanner" ]; then
+    "$scanner" git --log-opts="$local_oid" --redact=100 --no-banner --no-color --ignore-gitleaks-allow --timeout 60
+  fi
+done
