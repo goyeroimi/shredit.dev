@@ -2,27 +2,39 @@ import type { Metadata, Viewport } from "next";
 import "./globals.css";
 import { getRequestLocale } from "@/lib/request-locale";
 import { getRequestTheme } from "@/lib/request-theme";
+import { SITE_ORIGIN } from "@/lib/site";
 import { ThemeProvider } from "@/lib/theme-provider";
 
 export const metadata: Metadata = {
-  title: "Shredit - Read once. Shred forever.",
-  description: "Encrypted one-time plaintext notes. No account required.",
+  metadataBase: new URL(SITE_ORIGIN),
+  title: {
+    default: "Shredit - Encrypted one-time notes",
+    template: "%s - Shredit",
+  },
+  description:
+    "Create an encrypted one-time plain text note, share the link once, and let the server discard the ciphertext after the first explicit open. No account, no tracking.",
+  applicationName: "Shredit",
   manifest: "/manifest.webmanifest",
   icons: {
     icon: [
-      { url: "/favicon.ico", type: "image/x-icon", sizes: "16x16 32x32" },
-      { url: "/shredit-mark.svg", type: "image/svg+xml", sizes: "any" },
+      { url: "/favicon.ico", type: "image/x-icon", sizes: "16x16 32x32 48x48" },
+      { url: "/icon.svg", type: "image/svg+xml", sizes: "any" },
     ],
     shortcut: "/favicon.ico",
     apple: [
       {
-        url: "/icons/shredit-180.png",
+        url: "/apple-icon.png",
         type: "image/png",
         sizes: "180x180",
       },
     ],
   },
-  robots: { index: false, follow: false, noarchive: true, nosnippet: true },
+  robots: { index: true, follow: true },
+  openGraph: {
+    type: "website",
+    siteName: "Shredit",
+    locale: "en_US",
+  },
 };
 
 export const viewport: Viewport = {

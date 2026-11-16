@@ -1894,6 +1894,7 @@ export function BuildInfoFooter({
           <a href="/security">{copy.footerSecurity}</a>
           <a href="/terms">{copy.footerTerms}</a>
           <a href="/abuse">{copy.footerAbuse}</a>
+          <a href="/changelog">{copy.footerChangelog}</a>
           {onionUrl && (
             <a href={onionUrl} target="_blank" rel="noreferrer">
               {copy.torMirror} <ExternalLink size={14} aria-hidden="true" />
@@ -1932,14 +1933,17 @@ export function ShreditShell({
       </a>
       <header className="site-header">
         <a href="/" className="brand-lockup">
-          <img
+          <svg
             className="brand-symbol"
-            src="/shredit-mark.svg"
+            viewBox="0 0 64 64"
             width="28"
             height="28"
-            alt=""
+            fill="#ed7b32"
             aria-hidden="true"
-          />
+          >
+            <path d="M60 30h-6V14.65a2 2 0 0 0-.59-1.42L42.77 2.58A2.08 2.08 0 0 0 41.34 2H12a2 2 0 0 0-2 2v26H4a2 2 0 0 0 0 4h56a2 2 0 0 0 0-4Z" />
+            <path d="M12 35.89a2 2 0 0 0-2 2V60a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2ZM20 35.89a2 2 0 0 0-2 2v16.86a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2ZM28 35.89a2 2 0 0 0-2 2V60a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2ZM36 35.89a2 2 0 0 0-2 2V60a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2ZM44 35.89a2 2 0 0 0-2 2v16.86a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2ZM52 35.89a2 2 0 0 0-2 2V60a2 2 0 0 0 4 0V37.89a2 2 0 0 0-2-2Z" />
+          </svg>
           <span className="brand-copy">
             <span className="brand-wordmark">Shredit</span>
             <span className="brand-slogan">/ {copy.brandSlogan}</span>

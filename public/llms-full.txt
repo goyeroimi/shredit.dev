@@ -1,0 +1,69 @@
+# Shredit full content
+
+> Complete public content of Shredit for AI assistants: product behavior, privacy, security, terms, abuse reporting, and the canonical source list. Private one-time note links are excluded.
+
+Last updated: 2026-11-16
+
+## What Shredit does
+
+Shredit creates one-time plain text notes. You write a note, encrypt it in your browser, and share a single link. The service keeps no account and no tracking. Encryption uses AES-256-GCM in the browser; the decryption key stays in the URL fragment and is not sent to the server. The server stores ciphertext and removes the active record after the first explicit open or when the configured expiry is reached.
+
+Limits and controls:
+
+- Plain text only, maximum 64 KiB of UTF-8 text.
+- Expiry choices: 1 hour, 24 hours, 7 days, 30 days, and Never.
+- Optional password gate of 8-128 characters; the password is a server access gate, not a second encryption key.
+- A failed password attempt does not consume the note.
+- Opening is explicit and permanent; the page requires confirmation before the note is destroyed.
+- The decryption key is part of the share link, after the # marker. Keep that part intact.
+
+## Privacy
+
+Plaintext is encrypted in your browser with AES-256-GCM before it is uploaded. The decryption key stays in the URL fragment and is not sent to the server. The server stores ciphertext and removes the active record after an explicit open or after expiry. A failed password attempt does not consume the note.
+
+Anonymous by design.* Using the onion mirror through Tor can substantially reduce network-level exposure. It cannot protect against a compromised device, identifying content, recipient actions, modified client code, or advanced traffic correlation.
+
+There are no analytics, advertising scripts, session replay tools, remote fonts, or behavioral profiles.
+
+## Security
+
+Shredit publishes its source under AGPL-3.0 and keeps the service narrow by design.
+
+The service is not a guarantee against screenshots, copied text, compromised devices, recipient actions, modified client code, or traffic correlation. The source is available for inspection; this is not a claim that an independent audit has been completed.
+
+Report a vulnerability through the security contact listed in SECURITY.md and /.well-known/security.txt. Do not include note contents, passwords, or full share links in a report. The public security.txt file lists the contact, policy, canonical URL, and expiry.
+
+## Terms
+
+Use Shredit only for lawful, responsible sharing of plain text. Do not use the service for abuse, fraud, credential theft, malware delivery, harassment, or unlawful content.
+
+Notes are at-most-once delivery. A browser crash or failed local decryption after the server responds can make a note unavailable forever.
+
+The service may throttle or reject requests to protect capacity and availability. Never share a password through the same channel as its link.
+
+## Abuse reporting
+
+Report suspected abuse with enough context for an operator to respond, without sending secrets. Include the relevant route, approximate time, and a concise description. Do not include plaintext, passwords, encryption keys, or full fragments.
+
+Reports are reviewed by the operator. Shredit does not inspect note plaintext as part of normal operation. Use the public contact address configured in the deployment environment and mirrored in /.well-known/security.txt. Reports are reviewed in the order received; the target for an initial review is five business days, which is a target rather than a guaranteed service level. Reports describing an immediate risk to people are prioritized.
+
+## What the server sees
+
+The server receives the network address of each request to enforce rate limits and abuse checks. Raw addresses are not stored in the application database: rate-limit counters use a keyed hash and expire within one hour or 24 hours, and one-time abuse challenges are held in memory for up to two minutes. The database stores the note identifier, creation and expiry times, the encrypted payload, and, when a password is set, an Argon2id verifier. A CDN country code may be read in memory to tune abuse challenges and is not stored. The application writes no request log. If the operator enables Cloudflare Turnstile, the client address is sent to Cloudflare for the challenge. Logs kept by the hosting operator's reverse proxy are outside the application.
+
+## Retention and backups
+
+Opening a note deletes its active database row in the same transaction that returns the ciphertext. A cleanup job is scheduled every five minutes and deletes expired rows; an expired note is never served, even before its row is removed. A keyed-hash tombstone prevents duplicate creation retries and is removed after a configurable retention period of 30 days by default. The application does not create or manage backups; any database backup policy belongs to the hosting operator. Consumed notes are not restored from backups as a service feature.
+
+## Policy changes
+
+Each policy carries a review date of November 16, 2026 for the current version. Material changes are listed on the [policy changes page](https://shredit.dev/changelog). There are no accounts to notify, so the changelog is the public record of updates; after a change, continued use means the current version applies. Documented changes: the November 16, 2026 transparency update added server-visible data, retention and backup limits, report handling targets, review dates, and the changelog itself; the October 7, 2026 entry records the first public source release under AGPL-3.0.
+
+## Canonical sources
+
+- [Shredit home](https://shredit.dev/): create an encrypted one-time note and share a single link; no account and no tracking.
+- [Privacy](https://shredit.dev/privacy): client-side encryption, fragment-key handling, one-time storage, and network limits.
+- [Security](https://shredit.dev/security): threat boundaries, responsible vulnerability disclosure, and source availability under AGPL-3.0.
+- [Terms](https://shredit.dev/terms): allowed use, at-most-once delivery, and service limits.
+- [Abuse contact](https://shredit.dev/abuse): how to report abuse without sending note contents, passwords, or decryption keys.
+- [Policy changes](https://shredit.dev/changelog): dated record of material policy updates and review dates.

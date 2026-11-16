@@ -1,0 +1,17 @@
+# Shredit
+
+> Shredit is an open-source, no-account service for encrypted one-time plain text notes. Notes are encrypted in the browser with AES-256-GCM, the decryption key stays in the URL fragment, and the server discards the ciphertext after the first explicit open or at expiry.
+
+Last updated: 2026-11-16
+
+## Product
+
+- [Shredit home](https://shredit.dev/): create an encrypted one-time note and share a single link; no account and no tracking.
+- [Privacy](https://shredit.dev/privacy): client-side encryption, fragment-key handling, one-time storage, and network limits.
+- [Security](https://shredit.dev/security): threat boundaries, responsible vulnerability disclosure, and source availability under AGPL-3.0.
+
+## Policies
+
+- [Terms](https://shredit.dev/terms): allowed use, at-most-once delivery, and service limits.
+- [Abuse contact](https://shredit.dev/abuse): how to report abuse without sending note contents, passwords, or decryption keys.
+- [Policy changes](https://shredit.dev/changelog): dated record of material policy updates and their scope.

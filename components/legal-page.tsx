@@ -18,6 +18,7 @@ export default function LegalPage({
 }) {
   const [locale, setLocale] = useLocale(initialLocale);
   const data = messages[locale].legal[kind];
+  const labels = messages[locale];
   const contact =
     kind === "abuse"
       ? publicConfig.abuseContact
@@ -48,6 +49,11 @@ export default function LegalPage({
                 <a href={contact}>{contact}</a>
               </p>
             )}
+            <p className="legal-meta">
+              {labels.legalReviewed}{" "}
+              <span aria-hidden="true">·</span>{" "}
+              <a href="/changelog">{labels.legalChangelog}</a>
+            </p>
             {data.sections.map(([heading, body], index) => (
               <section key={heading}>
                 <span className="legal-index" aria-hidden="true">

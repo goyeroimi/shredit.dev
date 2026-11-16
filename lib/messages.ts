@@ -132,7 +132,10 @@ export const messages = {
     footerSecurity: "Security",
     footerTerms: "Terms",
     footerAbuse: "Abuse contact",
+    footerChangelog: "Policy changes",
     footerNavigation: "Footer",
+    legalReviewed: "Last reviewed: November 16, 2026",
+    legalChangelog: "Policy changes",
     languageEnglish: "English",
     languageChinese: "简体中文",
     legal: {
@@ -157,6 +160,18 @@ export const messages = {
             "No tracking",
             "There are no analytics, advertising scripts, session replay tools, remote fonts, or behavioral profiles.",
           ],
+          [
+            "What the server sees",
+            "The server receives the network address of each request to enforce rate limits and abuse checks. Raw addresses are not stored in the application database: rate-limit counters use a keyed hash and expire within one hour or 24 hours, and one-time abuse challenges are held in memory for up to two minutes. The database stores the note identifier, creation and expiry times, the encrypted payload, and, when a password is set, an Argon2id verifier. A CDN country code may be read in memory to tune abuse challenges and is not stored. The application writes no request log. If the operator enables Cloudflare Turnstile, the client address is sent to Cloudflare for the challenge.",
+          ],
+          [
+            "Retention and backups",
+            "Opening a note deletes its active database row in the same transaction that returns the ciphertext. A cleanup job is scheduled every five minutes and deletes expired rows; an expired note is never served, even before its row is removed. A keyed-hash tombstone prevents duplicate creation retries and is removed after a configurable retention period of 30 days by default. The application does not create or manage backups; any database backup policy belongs to the hosting operator. Consumed notes are not restored from backups as a service feature.",
+          ],
+          [
+            "Hosting logs",
+            "Logs kept by the hosting operator's reverse proxy are outside the application and follow the operator's retention policy. Shredit does not add analytics, error-reporting SDKs, or third-party scripts to public pages.",
+          ],
         ],
       },
       security: {
@@ -171,6 +186,10 @@ export const messages = {
           [
             "Report a vulnerability",
             "Please use the security contact listed in SECURITY.md and /.well-known/security.txt. Do not include note contents, passwords, or full share links in a report.",
+          ],
+          [
+            "Report handling",
+            "Reports are reviewed by the operator in the order received. The target for an initial review is five business days; this is a target, not a guaranteed service level. Reports describing an immediate risk to people are prioritized. Please allow time for a fix before public disclosure.",
           ],
           [
             "Source",
@@ -195,6 +214,10 @@ export const messages = {
             "Limits",
             "The service may throttle or reject requests to protect capacity and availability. Never share a password through the same channel as its link.",
           ],
+          [
+            "Policy changes",
+            "Each policy carries a review date. Material changes are listed on the policy changes page. There are no accounts to notify, so check that page for updates. After a change, continued use means the current version applies.",
+          ],
         ],
       },
       abuse: {
@@ -211,11 +234,34 @@ export const messages = {
             "Reports are reviewed by the operator. Shredit does not inspect note plaintext as part of normal operation.",
           ],
           [
+            "Timelines",
+            "Reports are reviewed in the order received. The target for an initial review is five business days; this is a target, not a guaranteed service level. Reports describing an immediate risk to people are prioritized. The operator may throttle or block abusive traffic.",
+          ],
+          [
             "Contact",
             "Use the public address configured in the deployment environment and mirrored in /.well-known/security.txt.",
           ],
         ],
       },
+    },
+    changelog: {
+      title: "Policy changes",
+      intro:
+        "A dated record of material changes to Shredit's public policies and the public files that describe them.",
+      entries: [
+        {
+          date: "2026-11-16",
+          label: "November 16, 2026",
+          title: "Policy transparency update",
+          body: "Added what the server sees, retention and backup limits, report handling targets, review dates, and this change log. The encryption protocol and note behavior are unchanged.",
+        },
+        {
+          date: "2026-10-07",
+          label: "October 7, 2026",
+          title: "First public source release",
+          body: "The privacy, security, terms, and abuse policies were included in the first public repository release under AGPL-3.0.",
+        },
+      ],
     },
   },
   "zh-CN": {
@@ -340,7 +386,10 @@ export const messages = {
     footerSecurity: "安全",
     footerTerms: "条款",
     footerAbuse: "滥用举报",
+    footerChangelog: "政策变更",
     footerNavigation: "页脚导航",
+    legalReviewed: "最后审查：2026年11月16日",
+    legalChangelog: "政策变更",
     languageEnglish: "English",
     languageChinese: "简体中文",
     legal: {
@@ -364,6 +413,18 @@ export const messages = {
             "无跟踪",
             "本服务不使用分析工具、广告脚本、会话回放工具、远程字体或行为画像。",
           ],
+          [
+            "服务器可见的数据",
+            "服务器会接收每个请求的网络地址，用于执行速率限制和滥用检查。原始地址不会写入应用数据库：速率限制计数器使用密钥哈希，并在一小时或 24 小时内过期；一次性滥用验证保存在内存中，最长两分钟。数据库保存便笺标识符、创建时间和到期时间、加密负载，以及在设置密码时保存 Argon2id 校验值。CDN 国家代码可能仅在内存中用于调整滥用验证，不会被保存。应用不写请求日志。如果运营方启用 Cloudflare Turnstile，客户端地址会发送给 Cloudflare 用于验证。",
+          ],
+          [
+            "保留与备份",
+            "打开便笺时，返回密文的同一事务会删除其活动数据库记录。清理任务每五分钟运行一次并删除已过期的记录；即使记录尚未被删除，过期便笺也绝不会被提供。密钥哈希墓碑用于防止重复创建重试，并按默认 30 天的可配置保留期删除。应用不创建也不管理备份；任何数据库备份策略由托管运营方负责。已读取的便笺不会作为服务功能从备份中恢复。",
+          ],
+          [
+            "托管日志",
+            "托管运营方反向代理保留的日志不属于应用，并遵循运营方的保留策略。Shredit 不会在公开页面添加分析工具、错误报告 SDK 或第三方脚本。",
+          ],
         ],
       },
       security: {
@@ -377,6 +438,10 @@ export const messages = {
           [
             "报告漏洞",
             "请使用 SECURITY.md 和 /.well-known/security.txt 中列出的安全联系方式。报告中不要包含便笺内容、密码或完整的分享链接。",
+          ],
+          [
+            "举报处理",
+            "举报由运营方按收到顺序审核。初次审核的目标为五个工作日内；这是目标，不是有保证的服务水平。涉及人身紧迫风险的报告会优先处理。请在公开披露前留出修复时间。",
           ],
           [
             "源代码",
@@ -400,6 +465,10 @@ export const messages = {
             "限制",
             "为保护容量和可用性，本服务可能限制或拒绝请求。切勿通过与链接相同的渠道分享密码。",
           ],
+          [
+            "政策变更",
+            "每项政策都标注审查日期。重要变更会列在政策变更页面中。本服务没有账户可用于通知，因此请查看该页面以了解更新。变更后继续使用本服务，即适用当前版本。",
+          ],
         ],
       },
       abuse: {
@@ -416,11 +485,33 @@ export const messages = {
             "举报由运营方审核。Shredit 在正常运行过程中不会检查便笺的纯文本内容。",
           ],
           [
+            "时间安排",
+            "举报按收到顺序审核。初次审核的目标为五个工作日内；这是目标，不是有保证的服务水平。涉及人身紧迫风险的报告会优先处理。运营方可能限制或阻止滥用流量。",
+          ],
+          [
             "联系方式",
             "请使用部署环境中配置并同步到 /.well-known/security.txt 的公开地址。",
           ],
         ],
       },
+    },
+    changelog: {
+      title: "政策变更",
+      intro: "记录 Shredit 公开政策及相关公开文件的重要变更，按日期排列。",
+      entries: [
+        {
+          date: "2026-11-16",
+          label: "2026年11月16日",
+          title: "政策透明度更新",
+          body: "新增服务器可见的数据、保留与备份边界、举报处理目标、审查日期和本变更记录。加密协议与便笺行为未变。",
+        },
+        {
+          date: "2026-10-07",
+          label: "2026年10月7日",
+          title: "首次公开发布源代码",
+          body: "隐私、安全、条款和滥用举报政策随首次公开仓库发布一并提供，采用 AGPL-3.0 许可。",
+        },
+      ],
     },
   },
 } as const;

@@ -14,22 +14,35 @@ describe("Shredit brand assets", () => {
     expect(svg).not.toContain('viewBox="0 0 64 80"');
   });
 
-  it("declares vector and install-size icons in the web manifest", () => {
+  it("serves the canonical mark under the icon and favicon names", () => {
+    const mark = readFileSync(
+      new URL("../public/shredit-mark.svg", import.meta.url),
+    );
+
+    expect(readFileSync(new URL("../public/icon.svg", import.meta.url))).toEqual(
+      mark,
+    );
+    expect(
+      readFileSync(new URL("../public/favicon.svg", import.meta.url)),
+    ).toEqual(mark);
+  });
+
+  it("declares canonical vector and install-size icons in the web manifest", () => {
     expect(manifest().icons).toEqual([
       {
-        src: "/shredit-mark.svg",
+        src: "/icon.svg",
         sizes: "any",
         type: "image/svg+xml",
         purpose: "any",
       },
       {
-        src: "/icons/shredit-192.png",
+        src: "/icon-192.png",
         sizes: "192x192",
         type: "image/png",
         purpose: "any",
       },
       {
-        src: "/icons/shredit-512.png",
+        src: "/icon-512.png",
         sizes: "512x512",
         type: "image/png",
         purpose: "any",
@@ -42,6 +55,6 @@ describe("Shredit brand assets", () => {
       new URL("../public/favicon.ico", import.meta.url),
     );
 
-    expect([...favicon.subarray(0, 6)]).toEqual([0, 0, 1, 0, 2, 0]);
+    expect([...favicon.subarray(0, 6)]).toEqual([0, 0, 1, 0, 3, 0]);
   });
 });

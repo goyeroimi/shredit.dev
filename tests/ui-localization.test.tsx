@@ -303,7 +303,8 @@ describe("UI localization contract", () => {
     );
     expect(markup).toContain("Read once. Shred forever.");
     expect(markup).toContain('class="brand-symbol"');
-    expect(markup).toContain('src="/shredit-mark.svg"');
+    expect(markup).toContain('viewBox="0 0 64 64"');
+    expect(markup).not.toContain("/shredit-mark.svg");
     expect(markup).toContain("Tor mirror");
     expect(markup).not.toContain("advanced traffic correlation");
   });
