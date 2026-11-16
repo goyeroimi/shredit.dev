@@ -285,6 +285,10 @@ ul {
   outline-offset: 3px;
 }
 
+h1[tabindex="-1"]:focus {
+  outline: none;
+}
+
 .sr-only {
   position: absolute !important;
   width: 1px !important;
