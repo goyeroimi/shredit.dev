@@ -223,7 +223,7 @@ describe("UI localization contract", () => {
       "<textarea",
       "Expiration",
       "Protect with a password",
-      "anti-abuse-slot",
+      "Guarantees",
       "Create note",
       "Anonymous by design.*",
       "Using the onion mirror through Tor",

@@ -972,15 +972,15 @@ These IDs are the canonical UI copy for the first implementation. Keep English a
 | `nav.language` | Language | 语言 |
 | `create.title` | Create a one-time note | 创建一次性便笺 |
 | `create.noAccount` | No account required. | 无需注册。 |
-| `create.plainText` | Plain text only. | 仅支持纯文本。 |
+| `create.plainText` | Plain text only | 仅支持纯文本 |
 | `create.encryption` | Encrypted in your browser. Stored as ciphertext. | 在浏览器中加密。服务器仅保存密文。 |
 | `create.noteLabel` | Your note | 你的便笺 |
 | `create.notePlaceholder` | Write your note... | 输入便笺内容... |
-| `create.byteCount` | {used} / {limit} bytes | {used} / {limit} 字节 |
-| `create.byteUnit` | UTF-8 bytes | UTF-8 字节数 |
+| `create.byteCount` | {used} / {limit} UTF-8 bytes | {used} / {limit} UTF-8 字节 |
 | `create.maxSize` | Maximum 64 KiB | 最大 64 KiB |
 | `create.passwordToggle` | Protect with a password | 使用密码保护 |
 | `create.passwordOptional` | Password (optional) | 密码（可选） |
+| `create.passwordTitle` | Password | 密码 |
 | `create.passwordPlaceholder` | Enter a password | 输入密码 |
 | `create.generatePassword` | Generate password | 生成密码 |
 | `create.useGeneratedPassword` | Use generated password | 使用生成的密码 |
@@ -991,6 +991,7 @@ These IDs are the canonical UI copy for the first implementation. Keep English a
 | `expiry.30d` | 30 days | 30 天 |
 | `expiry.never` | Never | 永不过期 |
 | `create.submit` | Create note | 创建便笺 |
+| `create.submitHint` | Add text to create a note. | 输入文字后即可创建便笺。 |
 | `create.submitting` | Creating note... | 正在创建便笺... |
 | `create.encrypting` | Encrypting in your browser... | 正在浏览器中加密... |
 | `create.checking` | Checking request... | 正在检查请求... |

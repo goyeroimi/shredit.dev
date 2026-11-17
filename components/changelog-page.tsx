@@ -26,7 +26,7 @@ export default function ChangelogPage({
           <div className="workspace-bar">
             <div className="workspace-bar-group">
               <span className="workspace-label">Shredit</span>
-              <span className="workspace-divider" aria-hidden="true" />
+              <span className="workspace-separator" aria-hidden="true">·</span>
               <span>{data.title}</span>
             </div>
           </div>

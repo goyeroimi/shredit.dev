@@ -276,11 +276,12 @@ async function runRealNote(browser, viewport, locale, report) {
     attachDiagnostics(page, diagnostics);
     await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
     await page
-      .locator(
-        ".anti-abuse-ready, .turnstile-widget, .anti-abuse-slot .notice-error",
-      )
+      .locator(".workspace-encryption.success")
       .first()
       .waitFor({ timeout: 30000 });
+    await page
+      .locator(".rail-pending")
+      .waitFor({ state: "hidden", timeout: 30000 });
     report.baselines.push({
       locale,
       viewport,

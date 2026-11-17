@@ -202,9 +202,13 @@ try {
           });
       });
       await page.goto(`${baseUrl}/`, { waitUntil: "networkidle" });
-      await page.waitForSelector(
-        ".anti-abuse-ready, .turnstile-widget, .anti-abuse-slot .notice-error",
-      );
+      await page.waitForSelector(".workspace-encryption.success", {
+        timeout: 30000,
+      });
+      await page.waitForSelector(".rail-pending", {
+        state: "hidden",
+        timeout: 30000,
+      });
       const compose = await readLayout(page, "compose");
       await page.screenshot({
         path: path.join(

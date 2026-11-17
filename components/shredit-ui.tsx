@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import {
   AlertTriangle,
   ArrowRight,
@@ -58,6 +58,21 @@ type OpenErrorKey =
 
 function useCopy(locale: Locale) {
   return messages[locale] as CopyType;
+}
+
+function PrivacyNote({ locale }: { locale: Locale }) {
+  const copy = useCopy(locale);
+  const id = useId();
+  return (
+    <aside
+      className="workspace-privacy"
+      aria-labelledby={`${id}-label`}
+      aria-describedby={`${id}-text`}
+    >
+      <strong id={`${id}-label`}>{copy.anonymous}</strong>
+      <span id={`${id}-text`}>{copy.torFootnote}</span>
+    </aside>
+  );
 }
 
 export function LanguageMenu({
@@ -213,7 +228,6 @@ export function ByteCounter({
   return (
     <div className={`byte-counter ${state}`} aria-live="polite">
       <span>{copy.bytes(used, MAX_NOTE_PLAINTEXT_BYTES)}</span>
-      <span>{copy.byteUnit}</span>
     </div>
   );
 }
@@ -397,13 +411,13 @@ export function PasswordControl({
   const copy = useCopy(locale);
   const [visible, setVisible] = useState(false);
   const length = passwordCodePointLength(normalizePassword(value));
-  const invalid = enabled && (length < 8 || length > 128);
+  const invalid = enabled && length > 0 && (length < 8 || length > 128);
   return (
     <div
       className={`password-control ${!enabled || disabled ? "disabled" : ""}`}
     >
       <div className="field-heading">
-        <label htmlFor="note-password">{copy.passwordOptional}</label>
+        <label htmlFor="note-password">{copy.passwordTitle}</label>
         <span>{enabled ? `${length}/128` : ""}</span>
       </div>
       <div className="password-row">
@@ -419,7 +433,7 @@ export function PasswordControl({
             onChange={(event) => onChange(event.target.value)}
             placeholder={copy.passwordPlaceholder}
             aria-invalid={invalid}
-            aria-describedby={invalid ? "password-error" : undefined}
+            aria-describedby="password-error"
           />
           <button
             className="inline-icon-button"
@@ -448,8 +462,11 @@ export function PasswordControl({
           <span className="sr-only">{copy.generatePassword}</span>
         </button>
       </div>
-      {invalid && (
-        <p id="password-error" className="field-error">
+      {enabled && (
+        <p
+          id="password-error"
+          className={invalid ? "field-error" : "field-hint"}
+        >
           {copy.passwordRequirements}
         </p>
       )}
@@ -472,7 +489,7 @@ export function GeneratedPasswordField({
     <div className="share-block">
       <div className="share-row">
         <div className="share-content">
-          <span className="share-label">{copy.passwordOptional}</span>
+          <span className="share-label">{copy.passwordTitle}</span>
           <code aria-label={visible ? undefined : copy.passwordHidden}>
             {visible ? value : "••••••••••••"}
           </code>
@@ -946,6 +963,7 @@ export function NoteComposer({
 
   const noteIsOverLimit = utf8ByteLength(text) > MAX_NOTE_PLAINTEXT_BYTES;
   const requestLocked = prepared !== null;
+  const emptyNoteHint = !prepared && text.length === 0 && status === "idle";
 
   return (
     <section
@@ -958,8 +976,14 @@ export function NoteComposer({
           <div className="workspace-bar">
             <div className="workspace-bar-group">
               <span className="workspace-label">{copy.composeLabel}</span>
-              <span className="workspace-divider" aria-hidden="true" />
-              <span>{copy.createPlainText} · UTF-8</span>
+              <span className="workspace-separator" aria-hidden="true">
+                ·
+              </span>
+              <span>{copy.createPlainText}</span>
+              <span className="workspace-separator" aria-hidden="true">
+                ·
+              </span>
+              <span>UTF-8</span>
             </div>
             <div
               className={`workspace-encryption ${encryptionTone}`}
@@ -1030,14 +1054,20 @@ export function NoteComposer({
           <section className="rail-section rail-access">
             <div className="rail-heading">
               <span className="rail-index">02</span>
-              <h2>{copy.passwordOptional}</h2>
-              <span className="rail-optional">{copy.optionalLabel}</span>
+              <h2>
+                {passwordEnabled ? copy.passwordTitle : copy.passwordOptional}
+              </h2>
+            </div>
+            <div className="toggle-row">
+              <span className="toggle-label" id="password-toggle-label">
+                {copy.passwordToggle}
+              </span>
               <button
                 id="password-toggle"
                 className={`toggle ${passwordEnabled ? "on" : ""}`}
                 type="button"
                 role="switch"
-                aria-label={copy.passwordToggle}
+                aria-labelledby="password-toggle-label"
                 aria-checked={passwordEnabled}
                 disabled={requestLocked}
                 onClick={() => {
@@ -1048,7 +1078,7 @@ export function NoteComposer({
                 <span />
               </button>
             </div>
-            {passwordEnabled ? (
+            {passwordEnabled && (
               <PasswordControl
                 locale={locale}
                 enabled
@@ -1060,33 +1090,31 @@ export function NoteComposer({
                   setPassword(generatePassword());
                 }}
               />
-            ) : (
-              <p className="rail-help access-help">{copy.passwordToggle}</p>
             )}
           </section>
 
           <section className="rail-section rail-status">
             <div className="rail-heading">
               <span className="rail-index">03</span>
-              <h2>{copy.statusLabel}</h2>
+              <h2>{copy.guaranteesLabel}</h2>
             </div>
             <ul className="status-list">
-              <li className={`status-${encryptionTone}`}>
-                {cryptoAvailable === false ? (
+              {cryptoAvailable === false ? (
+                <li className="status-danger">
                   <AlertTriangle size={14} aria-hidden="true" />
-                ) : cryptoAvailable === null ? (
+                  <span>{copy.cryptoUnavailable}</span>
+                </li>
+              ) : cryptoAvailable === null ? (
+                <li>
                   <RefreshCw size={14} className="spin" aria-hidden="true" />
-                ) : (
+                  <span>{copy.encryptionChecking}</span>
+                </li>
+              ) : (
+                <li className="status-success">
                   <Check size={14} aria-hidden="true" />
-                )}
-                <span>
-                  {cryptoAvailable === false
-                    ? copy.cryptoUnavailable
-                    : cryptoAvailable === null
-                      ? copy.encryptionChecking
-                      : copy.createEncryption}
-                </span>
-              </li>
+                  <span>{copy.createEncryption}</span>
+                </li>
+              )}
               <li className="status-success">
                 <Check size={14} aria-hidden="true" />
                 <span>{copy.brandSupporting}</span>
@@ -1096,49 +1124,41 @@ export function NoteComposer({
                 <span>{copy.homeNoTracking}</span>
               </li>
             </ul>
-            <div className="anti-abuse-slot" aria-live="polite">
-              {!antiAbusePolicy && !antiAbuseError && (
-                <span>{copy.checking}</span>
-              )}
-              {antiAbuseError && (
-                <ErrorNotice
-                  action={
-                    <button
-                      className="icon-button notice-action"
-                      type="button"
-                      aria-label={copy.retryPolicy}
-                      title={copy.retryPolicy}
-                      onClick={() =>
-                        setAntiAbusePolicyAttempt((attempt) => attempt + 1)
-                      }
-                    >
-                      <RefreshCw size={17} aria-hidden="true" />
-                    </button>
-                  }
-                >
-                  {copy.antiAbuseUnavailable}
-                </ErrorNotice>
-              )}
-              {antiAbusePolicy?.turnstileRequired &&
-                antiAbusePolicy.turnstileSiteKey && (
-                  <TurnstileWidget
-                    key={turnstileEpoch}
-                    siteKey={antiAbusePolicy.turnstileSiteKey}
-                    onToken={setTurnstileToken}
-                  />
-                )}
-              {antiAbusePolicy && !antiAbusePolicy.turnstileRequired && (
-                <span className="anti-abuse-ready">
-                  <span className="status-dot" aria-hidden="true" />
-                  {antiAbusePolicy.powRequired
-                    ? copy.powWorking
-                    : copy.antiAbuseReady}
-                </span>
-              )}
-            </div>
           </section>
 
           <div className="rail-feedback">
+            {!antiAbusePolicy && !antiAbuseError && (
+              <p className="rail-pending" aria-live="polite">
+                {copy.checking}
+              </p>
+            )}
+            {antiAbuseError && (
+              <ErrorNotice
+                action={
+                  <button
+                    className="icon-button notice-action"
+                    type="button"
+                    aria-label={copy.retryPolicy}
+                    title={copy.retryPolicy}
+                    onClick={() =>
+                      setAntiAbusePolicyAttempt((attempt) => attempt + 1)
+                    }
+                  >
+                    <RefreshCw size={17} aria-hidden="true" />
+                  </button>
+                }
+              >
+                {copy.antiAbuseUnavailable}
+              </ErrorNotice>
+            )}
+            {antiAbusePolicy?.turnstileRequired &&
+              antiAbusePolicy.turnstileSiteKey && (
+                <TurnstileWidget
+                  key={turnstileEpoch}
+                  siteKey={antiAbusePolicy.turnstileSiteKey}
+                  onToken={setTurnstileToken}
+                />
+              )}
             {cryptoAvailable === false && (
               <ErrorNotice>{copy.cryptoUnavailable}</ErrorNotice>
             )}
@@ -1194,6 +1214,7 @@ export function NoteComposer({
             <button
               className="primary-button"
               type="submit"
+              aria-describedby={emptyNoteHint ? "submit-hint" : undefined}
               disabled={
                 status === "encrypting" ||
                 status === "pow" ||
@@ -1220,14 +1241,16 @@ export function NoteComposer({
                 aria-hidden="true"
               />
             </button>
+            {emptyNoteHint && (
+              <p id="submit-hint" className="rail-hint">
+                {copy.submitHint}
+              </p>
+            )}
           </div>
         </form>
       </div>
 
-      <div className="workspace-privacy">
-        <strong>{copy.anonymous}</strong>
-        <span>{copy.torFootnote}</span>
-      </div>
+      <PrivacyNote locale={locale} />
     </section>
   );
 }
@@ -1298,7 +1321,7 @@ export function CreateResult({
           <div className="workspace-bar">
             <div className="workspace-bar-group">
               <span className="workspace-label">{copy.resultTitle}</span>
-              <span className="workspace-divider" aria-hidden="true" />
+              <span className="workspace-separator" aria-hidden="true">·</span>
               <span>{copy.sourceAudit}</span>
             </div>
             <span className="workspace-encryption success-text">
@@ -1357,7 +1380,7 @@ export function CreateResult({
                 <dd>{expiryText}</dd>
               </div>
               <div>
-                <dt>{copy.passwordOptional}</dt>
+                <dt>{copy.passwordTitle}</dt>
                 <dd>
                   {result.password ? copy.passwordRequired : copy.optionalLabel}
                 </dd>
@@ -1399,10 +1422,7 @@ export function CreateResult({
           </div>
         </aside>
       </div>
-      <div className="workspace-privacy">
-        <strong>{copy.anonymous}</strong>
-        <span>{copy.torFootnote}</span>
-      </div>
+      <PrivacyNote locale={locale} />
     </section>
   );
 }
@@ -1427,7 +1447,7 @@ export function UnavailableNoteState({
       <div className="workspace-bar">
         <div className="workspace-bar-group">
           <span className="workspace-label">{copy.noteKicker}</span>
-          <span className="workspace-divider" aria-hidden="true" />
+          <span className="workspace-separator" aria-hidden="true">·</span>
           <span>{copy.unavailableTitle}</span>
         </div>
       </div>
@@ -1446,10 +1466,7 @@ export function UnavailableNoteState({
           <ArrowRight className="button-arrow" size={18} aria-hidden="true" />
         </a>
       </div>
-      <div className="workspace-privacy">
-        <strong>{copy.anonymous}</strong>
-        <span>{copy.torFootnote}</span>
-      </div>
+      <PrivacyNote locale={locale} />
     </section>
   );
 }
@@ -1467,7 +1484,7 @@ export function NoteViewer({ locale, text }: { locale: Locale; text: string }) {
       <div className="workspace-bar viewer-bar">
         <div className="workspace-bar-group">
           <span className="workspace-label">{copy.viewerTitle}</span>
-          <span className="workspace-divider" aria-hidden="true" />
+          <span className="workspace-separator" aria-hidden="true">·</span>
           <span>{copy.createEncryption}</span>
         </div>
         <span className="destroyed-status">
@@ -1501,10 +1518,7 @@ export function NoteViewer({ locale, text }: { locale: Locale; text: string }) {
           {copy.copyFailed}
         </p>
       )}
-      <div className="workspace-privacy">
-        <strong>{copy.anonymous}</strong>
-        <span>{copy.torFootnote}</span>
-      </div>
+      <PrivacyNote locale={locale} />
     </section>
   );
 }
@@ -1711,7 +1725,7 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
       <div className="workspace-bar">
         <div className="workspace-bar-group">
           <span className="workspace-label">{copy.noteKicker}</span>
-          <span className="workspace-divider" aria-hidden="true" />
+          <span className="workspace-separator" aria-hidden="true">·</span>
           <span>{copy.brandSupporting}</span>
         </div>
         <span className={`workspace-encryption ${headerStatusTone}`}>
@@ -1809,10 +1823,7 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
           </form>
         )}
       </div>
-      <div className="workspace-privacy">
-        <strong>{copy.anonymous}</strong>
-        <span>{copy.torFootnote}</span>
-      </div>
+      <PrivacyNote locale={locale} />
     </section>
   );
 }
