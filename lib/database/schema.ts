@@ -17,6 +17,9 @@ const binary = customType<{ data: Buffer; driverData: Buffer }>({
   dataType: () => "bytea",
 });
 
+export const REQUEST_FINGERPRINT_HASH_PATTERN =
+  "^[$]argon2id[$]v=19[$]m=[1-9][0-9]*,t=[1-9][0-9]*,p=[1-9][0-9]*[$][A-Za-z0-9+/]+[$][A-Za-z0-9+/]+$";
+
 export const notes = pgTable(
   "notes",
   {
@@ -57,6 +60,9 @@ export const noteCapacity = pgTable(
     activePayloadBytes: bigint("active_payload_bytes", { mode: "number" })
       .notNull()
       .default(0),
+    retainedNoteCount: bigint("retained_note_count", { mode: "number" })
+      .notNull()
+      .default(0),
     updatedAt: timestamp("updated_at", { withTimezone: true, mode: "date" })
       .notNull()
       .defaultNow(),
@@ -65,6 +71,10 @@ export const noteCapacity = pgTable(
     check("note_capacity_id_check", sql`${table.id} = 1`),
     check("note_capacity_count_check", sql`${table.activeNoteCount} >= 0`),
     check("note_capacity_bytes_check", sql`${table.activePayloadBytes} >= 0`),
+    check(
+      "note_capacity_retained_count_check",
+      sql`${table.retainedNoteCount} >= 0`,
+    ),
   ],
 );
 
@@ -72,7 +82,7 @@ export const noteCreateIdempotency = pgTable(
   "note_create_idempotency",
   {
     keyDigest: binary("key_digest").primaryKey(),
-    requestFingerprint: binary("request_fingerprint").notNull(),
+    requestFingerprint: text("request_fingerprint").notNull(),
     noteIdDigest: binary("note_id_digest").notNull(),
     createdAt: timestamp("created_at", { withTimezone: true, mode: "date" })
       .notNull()
@@ -91,14 +101,17 @@ export const noteCreateIdempotency = pgTable(
     uniqueIndex("note_create_idempotency_note_id_digest_uq").on(
       table.noteIdDigest,
     ),
-    index("note_create_idempotency_deleted_idx").on(table.noteDeletedAt),
+    index("note_create_idempotency_deleted_idx").on(
+      table.noteDeletedAt,
+      table.keyDigest,
+    ),
     check(
       "note_create_idempotency_key_digest_len_check",
       sql`octet_length(${table.keyDigest}) = 32`,
     ),
     check(
-      "note_create_idempotency_fingerprint_len_check",
-      sql`octet_length(${table.requestFingerprint}) = 32`,
+      "note_create_idempotency_fingerprint_argon2_check",
+      sql`octet_length(${table.requestFingerprint}) <= 512 AND ${table.requestFingerprint} ~ ${REQUEST_FINGERPRINT_HASH_PATTERN}`,
     ),
     check(
       "note_create_idempotency_note_digest_len_check",

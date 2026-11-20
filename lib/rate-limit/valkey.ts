@@ -143,6 +143,16 @@ local daily_limit = tonumber(ARGV[2])
 local ip_limit = tonumber(ARGV[3])
 local has_previous_ip = tonumber(ARGV[4])
 
+local function peek_window(key, window_seconds)
+  local count = tonumber(redis.call('GET', key) or '0')
+  local ttl = redis.call('TTL', key)
+  if count > 0 and ttl < 0 then
+    redis.call('EXPIRE', key, window_seconds)
+    ttl = window_seconds
+  end
+  return count, ttl
+end
+
 local function increment_window(key, window_seconds)
   local count = redis.call('INCR', key)
   local ttl = redis.call('TTL', key)
@@ -153,14 +163,14 @@ local function increment_window(key, window_seconds)
   return count, ttl
 end
 
--- Charge the two fixed-cardinality host windows first. Once either is full,
--- no attacker-controlled IP key or challenge-state key is created.
-local hourly_count, hourly_ttl = increment_window(KEYS[1], 3600)
-local daily_count, daily_ttl = increment_window(KEYS[2], 86400)
+-- Check the fixed-cardinality host windows without charging denied requests.
+-- Once either is full, no attacker-controlled IP or challenge key is created.
+local hourly_count, hourly_ttl = peek_window(KEYS[1], 3600)
+local daily_count, daily_ttl = peek_window(KEYS[2], 86400)
 local remaining = math.min(hourly_limit - hourly_count, daily_limit - daily_count)
 local retry_after = 0
-if hourly_count > hourly_limit then retry_after = math.max(retry_after, hourly_ttl) end
-if daily_count > daily_limit then retry_after = math.max(retry_after, daily_ttl) end
+if hourly_count >= hourly_limit then retry_after = math.max(retry_after, hourly_ttl, 1) end
+if daily_count >= daily_limit then retry_after = math.max(retry_after, daily_ttl, 1) end
 if retry_after > 0 then
   if remaining < 0 then remaining = 0 end
   return { 0, retry_after, remaining }
@@ -197,6 +207,10 @@ if effective_ip_count > ip_limit then
   return { 0, math.max(1, ip_retry), remaining }
 end
 
+-- Only an issuance allowed by the source budget consumes global capacity.
+hourly_count = increment_window(KEYS[1], 3600)
+daily_count = increment_window(KEYS[2], 86400)
+remaining = math.min(hourly_limit - hourly_count, daily_limit - daily_count, ip_limit - effective_ip_count)
 if remaining < 0 then remaining = 0 end
 return { 1, 0, remaining }
 `;
@@ -862,7 +876,7 @@ function consumeEphemeralPowChallengeIssuanceLimit(args: {
   dailyLimit: number;
   ipLimit: number;
 }): RateLimitDecision {
-  const hostDecision = consumeEphemeralFixedWindows([
+  const hostWindows: FixedWindowDimension[] = [
     {
       activeKey: `${KEY_PREFIX}:rl:pow-issuance:host-hour`,
       limit: args.hourlyLimit,
@@ -873,8 +887,22 @@ function consumeEphemeralPowChallengeIssuanceLimit(args: {
       limit: args.dailyLimit,
       windowSeconds: 86_400,
     },
-  ]);
-  if (!hostDecision.allowed) return hostDecision;
+  ];
+  const nowMs = Date.now();
+  let retryAfterSeconds = 0;
+  for (const window of hostWindows) {
+    const counter = cleanCounter(window.activeKey, nowMs);
+    if (counter && counter.value >= window.limit) {
+      retryAfterSeconds = Math.max(
+        retryAfterSeconds,
+        Math.ceil((counter.expiresAtMs - nowMs) / 1_000),
+        1,
+      );
+    }
+  }
+  if (retryAfterSeconds > 0) {
+    return { allowed: false, retryAfterSeconds, remaining: 0, cost: 1 };
+  }
 
   const ipDecision = consumeEphemeralFixedWindows([
     {
@@ -884,6 +912,10 @@ function consumeEphemeralPowChallengeIssuanceLimit(args: {
       windowSeconds: POW_ISSUANCE_IP_WINDOW_SECONDS,
     },
   ]);
+  if (!ipDecision.allowed) return ipDecision;
+
+  // Keep the check, source budget, and global charge synchronous, like the script.
+  const hostDecision = consumeEphemeralFixedWindows(hostWindows);
   return {
     allowed: ipDecision.allowed,
     retryAfterSeconds: ipDecision.retryAfterSeconds,

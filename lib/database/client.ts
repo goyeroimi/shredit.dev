@@ -48,12 +48,25 @@ export async function databaseReady(): Promise<boolean> {
     const db = getDatabase();
     const result = await db.execute<{ ready: boolean }>(sql`
       select (
-        exists(select 1 from shredit_schema_version where singleton = true and version = 1)
-        and exists(select 1 from note_capacity where id = 1)
+        exists(select 1 from shredit_schema_version where singleton = true and version = 2)
+        and exists(select 1 from note_capacity where id = 1 and retained_note_count >= 0)
+        and exists (
+          select 1 from pg_attribute
+          where attrelid = 'public.note_create_idempotency'::regclass
+            and attname = 'request_fingerprint' and atttypid = 'text'::regtype
+            and attnotnull and not attisdropped
+        )
+        and exists (
+          select 1 from pg_attribute
+          where attrelid = 'public.note_capacity'::regclass
+            and attname = 'retained_note_count' and atttypid = 'bigint'::regtype
+            and attnotnull and not attisdropped
+        )
         and to_regclass('public.notes') is not null
         and to_regclass('public.note_create_idempotency') is not null
         and to_regclass('public.notes_expires_at_idx') is not null
         and to_regclass('public.note_create_idempotency_note_id_digest_uq') is not null
+        and to_regclass('public.note_create_idempotency_deleted_idx') is not null
         and not exists (
           select 1
           from (values
@@ -65,8 +78,9 @@ export async function databaseReady(): Promise<boolean> {
             ('note_capacity', 'note_capacity_id_check'),
             ('note_capacity', 'note_capacity_count_check'),
             ('note_capacity', 'note_capacity_bytes_check'),
+            ('note_capacity', 'note_capacity_retained_count_check'),
             ('note_create_idempotency', 'note_create_idempotency_key_digest_len_check'),
-            ('note_create_idempotency', 'note_create_idempotency_fingerprint_len_check'),
+            ('note_create_idempotency', 'note_create_idempotency_fingerprint_argon2_check'),
             ('note_create_idempotency', 'note_create_idempotency_note_digest_len_check'),
             ('note_create_idempotency', 'note_create_idempotency_surface_check'),
             ('shredit_schema_version', 'shredit_schema_version_singleton_check'),
@@ -79,6 +93,8 @@ export async function databaseReady(): Promise<boolean> {
             on constraint_record.conrelid = relation.oid
            and constraint_record.conname = expected.constraint_name
           where constraint_record.oid is null
+             or not constraint_record.convalidated
+             or constraint_record.contype <> 'c'
         )
       ) as ready
     `);

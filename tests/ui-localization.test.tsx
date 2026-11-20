@@ -340,6 +340,36 @@ describe("UI localization contract", () => {
     expect(skipText(chineseMarkup)).toMatch(/\p{Script=Han}/u);
   });
 
+  it("focuses main content without navigating away from the crypto fragment", () => {
+    const source = readFileSync(
+      new URL("../components/shredit-ui.tsx", import.meta.url),
+      "utf8",
+    );
+    const skipLink = source.slice(
+      source.indexOf('className="skip-link"'),
+      source.indexOf("{copy.skipToContent}"),
+    );
+    expect(skipLink).toContain('href="#main-content"');
+    expect(skipLink).toMatch(
+      /onClick=\{\(event\) => \{\s*event.preventDefault\(\);\s*document.getElementById\("main-content"\)\?\.focus\(\);/u,
+    );
+    expect(skipLink).not.toMatch(/location|replaceState|pushState/u);
+    for (const page of [
+      "note-page-client",
+      "home-page",
+      "legal-page",
+      "changelog-page",
+    ]) {
+      const pageSource = readFileSync(
+        new URL(`../components/${page}.tsx`, import.meta.url),
+        "utf8",
+      );
+      expect(pageSource).toMatch(
+        /<main id="main-content"[^>]*tabIndex=\{-1\}/u,
+      );
+    }
+  });
+
   it("renders a localized theme toggle for both theme states", () => {
     const publicConfig = {
       clearnetUrl: "https://shredit.dev",

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { PgDialect } from "drizzle-orm/pg-core";
 
 const databaseMocks = vi.hoisted(() => ({
   drizzle: vi.fn(),
@@ -39,6 +40,19 @@ describe("database readiness", () => {
     databaseMocks.execute.mockResolvedValue({ rows: [{ ready: true }] });
 
     await expect(databaseReady()).resolves.toBe(true);
+    const statement = new PgDialect().sqlToQuery(
+      databaseMocks.execute.mock.calls[0][0],
+    ).sql;
+    expect(statement).toContain("version = 2");
+    expect(statement).toContain("retained_note_count >= 0");
+    expect(statement).toContain("atttypid = 'text'::regtype");
+    expect(statement).toContain("atttypid = 'bigint'::regtype");
+    expect(statement).toContain("note_capacity_retained_count_check");
+    expect(statement).toContain(
+      "note_create_idempotency_fingerprint_argon2_check",
+    );
+    expect(statement).toContain("not constraint_record.convalidated");
+    expect(statement).not.toContain("fingerprint_len_check");
   });
 
   it("returns false when the readiness query fails", async () => {

@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { Pool } from "pg";
 import { getEnv } from "@/lib/config/env";
+import { migrateDatabase } from "@/lib/database/migrate";
 
 async function main() {
   const url = getEnv().DATABASE_URL;
@@ -21,8 +22,8 @@ async function main() {
       path.join(process.cwd(), "drizzle", "0000_initial.sql"),
       "utf8",
     );
-    await pool.query(migration);
-    console.log("Applied Shredit database migration 0000_initial.");
+    const version = await migrateDatabase(pool, migration);
+    console.log(`Shredit database schema is at version ${version}.`);
   } finally {
     await pool.end();
   }

@@ -2,7 +2,7 @@ import { timingSafeEqual } from "node:crypto";
 import { and, eq, gt, isNull, or } from "drizzle-orm";
 import type { PoolClient } from "pg";
 import { getEnv, type RequestSurface } from "@/lib/config/env";
-import { verifyPassword } from "@/lib/crypto/password";
+import { hashPassword, verifyPassword } from "@/lib/crypto/password";
 import { noteIdDigest, type ExpirySelection } from "@/lib/crypto/protocol";
 import { getDatabase, getPool } from "@/lib/database/client";
 import { noteCreateIdempotency, notes } from "@/lib/database/schema";
@@ -29,14 +29,14 @@ export interface ReplayLookup {
   surface: RequestSurface;
 }
 
-interface StoredNote extends NoteCreateRecord {
+interface StoredNote extends Omit<NoteCreateRecord, "fingerprint"> {
   createdAt: Date;
   payloadBytes: number;
 }
 
 interface IdempotencyRow {
   keyDigest: Uint8Array;
-  fingerprint: Uint8Array;
+  fingerprintHash: string;
   noteIdDigest: Uint8Array;
   surface: RequestSurface;
   expiresAt: Date | null;
@@ -75,7 +75,7 @@ interface NoteStoreBackend {
   cleanupExpired(
     limit?: number,
   ): Promise<{ deleted: number; payloadBytes: number }>;
-  cleanupTombstones(retentionDays: number): Promise<number>;
+  cleanupTombstones(retentionDays: number, limit?: number): Promise<number>;
   reconcile(): Promise<{ activeNoteCount: number; activePayloadBytes: number }>;
   stats(): Promise<{ activeNoteCount: number; activePayloadBytes: number }>;
   resetForTests(): Promise<void>;
@@ -90,6 +90,47 @@ function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
     left.byteLength === right.byteLength &&
     timingSafeEqual(Buffer.from(left), Buffer.from(right))
   );
+}
+
+// Private snapshots contain only immutable replay fields, never the fast fingerprint.
+interface ReplayCandidate {
+  kind: "verify-replay";
+  fingerprintHash: string;
+  surface: string;
+  expiresAt: Date | null;
+}
+
+function replayCandidate(row: IdempotencyRow): ReplayCandidate {
+  return {
+    kind: "verify-replay",
+    fingerprintHash: row.fingerprintHash,
+    surface: row.surface,
+    expiresAt: row.expiresAt,
+  };
+}
+
+async function verifyReplay(
+  input: ReplayLookup,
+  candidate: ReplayCandidate,
+): Promise<Exclude<ReplayResult, { kind: "missing" }>> {
+  if (
+    candidate.surface !== input.surface ||
+    !(await verifyPassword(hex(input.fingerprint), candidate.fingerprintHash))
+  ) {
+    return { kind: "idempotency-conflict" };
+  }
+  return { kind: "replay", id: input.id, expiresAt: candidate.expiresAt };
+}
+
+function batchLimit(limit: number): number {
+  return Number.isNaN(limit)
+    ? 100
+    : Math.max(1, Math.min(1000, Math.floor(limit)));
+}
+
+function assertRetentionDays(retentionDays: number): void {
+  if (!Number.isSafeInteger(retentionDays) || retentionDays < 1)
+    throw new Error("Tombstone retention must be a positive safe integer");
 }
 
 async function transaction<T>(
@@ -139,17 +180,11 @@ class MemoryNoteStore implements NoteStoreBackend {
   }
 
   async checkReplay(input: ReplayLookup): Promise<ReplayResult> {
-    return this.withLock(() => {
+    const candidate = await this.withLock(() => {
       const existing = this.idempotency.get(hex(input.keyDigest));
-      if (!existing) return { kind: "missing" };
-      if (
-        !equalBytes(existing.fingerprint, input.fingerprint) ||
-        existing.surface !== input.surface
-      ) {
-        return { kind: "idempotency-conflict" };
-      }
-      return { kind: "replay", id: input.id, expiresAt: existing.expiresAt };
+      return existing ? replayCandidate(existing) : undefined;
     });
+    return candidate ? verifyReplay(input, candidate) : { kind: "missing" };
   }
 
   async hasNoteIdCollision(id: string, digest: Uint8Array): Promise<boolean> {
@@ -163,18 +198,15 @@ class MemoryNoteStore implements NoteStoreBackend {
   }
 
   async create(input: NoteCreateRecord): Promise<CreateResult> {
-    return this.withLock(() => {
+    // Existing keys do not need a new salted hash. No Argon2 work holds the Map lock.
+    const replay = await this.checkReplay(input);
+    if (replay.kind !== "missing") return replay;
+    const { fingerprint, ...record } = input;
+    const fingerprintHash = await hashPassword(hex(fingerprint));
+    const result = await this.withLock<CreateResult | ReplayCandidate>(() => {
       const key = hex(input.keyDigest);
       const existing = this.idempotency.get(key);
-      if (existing) {
-        if (
-          !equalBytes(existing.fingerprint, input.fingerprint) ||
-          existing.surface !== input.surface
-        ) {
-          return { kind: "idempotency-conflict" };
-        }
-        return { kind: "replay", id: input.id, expiresAt: existing.expiresAt };
-      }
+      if (existing) return replayCandidate(existing);
 
       const sameNoteId = Array.from(this.idempotency.values()).some((row) =>
         equalBytes(row.noteIdDigest, input.noteIdDigest),
@@ -188,17 +220,18 @@ class MemoryNoteStore implements NoteStoreBackend {
       const maxCount = env.MAX_ACTIVE_NOTE_COUNT ?? 10_000;
       if (
         this.activeNoteCount + 1 > maxCount ||
-        this.activePayloadBytes + payloadBytes > maxBytes
+        this.activePayloadBytes + payloadBytes > maxBytes ||
+        this.idempotency.size >= (env.MAX_RETAINED_NOTE_COUNT ?? 1_000_000)
       ) {
         return { kind: "storage-full" };
       }
 
       const now = new Date();
-      const note: StoredNote = { ...input, createdAt: now, payloadBytes };
+      const note: StoredNote = { ...record, createdAt: now, payloadBytes };
       this.notes.set(note.id, note);
       this.idempotency.set(key, {
         keyDigest: input.keyDigest,
-        fingerprint: input.fingerprint,
+        fingerprintHash,
         noteIdDigest: input.noteIdDigest,
         surface: input.surface,
         expiresAt: input.expiresAt,
@@ -209,6 +242,9 @@ class MemoryNoteStore implements NoteStoreBackend {
       this.activePayloadBytes += payloadBytes;
       return { kind: "created", id: note.id, expiresAt: note.expiresAt };
     });
+    return result.kind === "verify-replay"
+      ? verifyReplay(input, result)
+      : result;
   }
 
   async metadata(id: string): Promise<{ requiresPassword: boolean } | null> {
@@ -277,7 +313,7 @@ class MemoryNoteStore implements NoteStoreBackend {
       let deleted = 0;
       let payloadBytes = 0;
       for (const note of this.notes.values()) {
-        if (deleted >= limit) break;
+        if (deleted >= batchLimit(limit)) break;
         if (note.expiresAt && note.expiresAt.getTime() <= now) {
           payloadBytes += note.payloadBytes;
           this.removeLocked(note, new Date(now));
@@ -288,17 +324,34 @@ class MemoryNoteStore implements NoteStoreBackend {
     });
   }
 
-  async cleanupTombstones(retentionDays: number): Promise<number> {
+  async cleanupTombstones(retentionDays: number, limit = 100): Promise<number> {
+    assertRetentionDays(retentionDays);
     return this.withLock(() => {
       const cutoff = Date.now() - retentionDays * 86_400_000;
-      let deleted = 0;
+      // Select at most one batch without duplicating the entire retained map.
+      const selected: Array<{ key: Hex; deletedAt: number }> = [];
+      const maximum = batchLimit(limit);
       for (const [key, row] of this.idempotency) {
-        if (row.noteDeletedAt && row.noteDeletedAt.getTime() <= cutoff) {
-          this.idempotency.delete(key);
-          deleted += 1;
-        }
+        if (!row.noteDeletedAt || row.noteDeletedAt.getTime() > cutoff)
+          continue;
+        const deletedAt = row.noteDeletedAt.getTime();
+        const last = selected[selected.length - 1];
+        if (
+          selected.length === maximum &&
+          (deletedAt > last.deletedAt ||
+            (deletedAt === last.deletedAt && key >= last.key))
+        )
+          continue;
+        selected.push({ key, deletedAt });
+        selected.sort(
+          (a, b) =>
+            a.deletedAt - b.deletedAt ||
+            (a.key < b.key ? -1 : a.key > b.key ? 1 : 0),
+        );
+        if (selected.length > maximum) selected.pop();
       }
-      return deleted;
+      for (const { key } of selected) this.idempotency.delete(key);
+      return selected.length;
     });
   }
 
@@ -307,14 +360,15 @@ class MemoryNoteStore implements NoteStoreBackend {
     activePayloadBytes: number;
   }> {
     return this.withLock(() => {
-      let activeNoteCount = 0;
-      let activePayloadBytes = 0;
+      const now = new Date();
       for (const note of this.notes.values()) {
-        if (!note.expiresAt || note.expiresAt.getTime() > Date.now()) {
-          activeNoteCount += 1;
-          activePayloadBytes += note.payloadBytes;
-        }
+        if (note.expiresAt && note.expiresAt.getTime() <= now.getTime())
+          this.removeLocked(note, now);
       }
+      const activeNoteCount = this.notes.size;
+      let activePayloadBytes = 0;
+      for (const note of this.notes.values())
+        activePayloadBytes += note.payloadBytes;
       this.activeNoteCount = activeNoteCount;
       this.activePayloadBytes = activePayloadBytes;
       return { activeNoteCount, activePayloadBytes };
@@ -353,13 +407,12 @@ class PostgresNoteStore implements NoteStoreBackend {
       .where(eq(noteCreateIdempotency.keyDigest, Buffer.from(input.keyDigest)))
       .limit(1);
     if (!row) return { kind: "missing" };
-    if (
-      !equalBytes(row.requestFingerprint, input.fingerprint) ||
-      row.surface !== input.surface
-    ) {
-      return { kind: "idempotency-conflict" };
-    }
-    return { kind: "replay", id: input.id, expiresAt: row.responseExpiresAt };
+    return verifyReplay(input, {
+      kind: "verify-replay",
+      fingerprintHash: row.requestFingerprint,
+      surface: row.surface,
+      expiresAt: row.responseExpiresAt,
+    });
   }
 
   async hasNoteIdCollision(id: string, digest: Uint8Array): Promise<boolean> {
@@ -372,92 +425,103 @@ class PostgresNoteStore implements NoteStoreBackend {
 
   async create(input: NoteCreateRecord): Promise<CreateResult> {
     const env = getEnv();
-    return transaction(async (client) => {
-      const capacity = await client.query<{
-        active_note_count: string;
-        active_payload_bytes: string;
-      }>(
-        "SELECT active_note_count, active_payload_bytes FROM note_capacity WHERE id = 1 FOR UPDATE",
-      );
-      if (capacity.rowCount !== 1)
-        throw new Error("Capacity ledger is not initialized");
+    const replay = await this.checkReplay(input);
+    if (replay.kind !== "missing") return replay;
+    const fingerprintHash = await hashPassword(hex(input.fingerprint));
+    const result = await transaction<CreateResult | ReplayCandidate>(
+      async (client) => {
+        const capacity = await client.query<{
+          active_note_count: string;
+          active_payload_bytes: string;
+          retained_note_count: string;
+        }>(
+          "SELECT active_note_count, active_payload_bytes, retained_note_count FROM note_capacity WHERE id = 1 FOR UPDATE",
+        );
+        if (capacity.rowCount !== 1)
+          throw new Error("Capacity ledger is not initialized");
 
-      const existing = await client.query<{
-        request_fingerprint: Buffer;
-        response_expires_at: Date | null;
-        surface: string;
-      }>(
-        "SELECT request_fingerprint, response_expires_at, surface FROM note_create_idempotency WHERE key_digest = $1",
-        [Buffer.from(input.keyDigest)],
-      );
-      if (existing.rowCount) {
-        const row = existing.rows[0];
-        if (
-          !equalBytes(row.request_fingerprint, input.fingerprint) ||
-          row.surface !== input.surface
-        ) {
-          return { kind: "idempotency-conflict" };
+        const existing = await client.query<{
+          request_fingerprint: string;
+          response_expires_at: Date | null;
+          surface: string;
+        }>(
+          "SELECT request_fingerprint, response_expires_at, surface FROM note_create_idempotency WHERE key_digest = $1",
+          [Buffer.from(input.keyDigest)],
+        );
+        if (existing.rowCount) {
+          const row = existing.rows[0];
+          // A competing create won while hashing. Commit/release before verification.
+          return {
+            kind: "verify-replay",
+            fingerprintHash: row.request_fingerprint,
+            surface: row.surface,
+            expiresAt: row.response_expires_at,
+          };
         }
-        return {
-          kind: "replay",
-          id: input.id,
-          expiresAt: row.response_expires_at,
-        };
-      }
 
-      const collision = await client.query(
-        "SELECT 1 FROM notes WHERE id = $1 UNION ALL SELECT 1 FROM note_create_idempotency WHERE note_id_digest = $2 LIMIT 1",
-        [input.id, Buffer.from(input.noteIdDigest)],
-      );
-      if (collision.rowCount) return { kind: "note-id-conflict" };
+        const collision = await client.query(
+          "SELECT 1 FROM notes WHERE id = $1 UNION ALL SELECT 1 FROM note_create_idempotency WHERE note_id_digest = $2 LIMIT 1",
+          [input.id, Buffer.from(input.noteIdDigest)],
+        );
+        if (collision.rowCount) return { kind: "note-id-conflict" };
 
-      const activeNoteCount = Number(capacity.rows[0].active_note_count);
-      const activePayloadBytes = Number(capacity.rows[0].active_payload_bytes);
-      const maxCount = env.MAX_ACTIVE_NOTE_COUNT;
-      const maxBytes = env.MAX_ACTIVE_NOTE_BYTES;
-      if (!maxCount || !maxBytes)
-        throw new Error("Finite capacity is not configured");
-      if (
-        activeNoteCount + 1 > maxCount ||
-        activePayloadBytes + input.ciphertext.byteLength > maxBytes
-      ) {
-        return { kind: "storage-full" };
-      }
+        const activeNoteCount = BigInt(capacity.rows[0].active_note_count);
+        const activePayloadBytes = BigInt(
+          capacity.rows[0].active_payload_bytes,
+        );
+        const retainedNoteCount = BigInt(capacity.rows[0].retained_note_count);
+        const maxCount = env.MAX_ACTIVE_NOTE_COUNT;
+        const maxBytes = env.MAX_ACTIVE_NOTE_BYTES;
+        if (!maxCount || !maxBytes)
+          throw new Error("Finite capacity is not configured");
+        if (
+          activeNoteCount >= BigInt(maxCount) ||
+          activePayloadBytes + BigInt(input.ciphertext.byteLength) >
+            BigInt(maxBytes) ||
+          retainedNoteCount >= BigInt(env.MAX_RETAINED_NOTE_COUNT ?? 1_000_000)
+        ) {
+          return { kind: "storage-full" };
+        }
 
-      await client.query(
-        `INSERT INTO notes (id, protocol_version, iv, ciphertext, payload_bytes, password_hash, expires_at)
+        await client.query(
+          `INSERT INTO notes (id, protocol_version, iv, ciphertext, payload_bytes, password_hash, expires_at)
          VALUES ($1, 1, $2, $3, $4, $5, $6)`,
-        [
-          input.id,
-          Buffer.from(input.iv),
-          Buffer.from(input.ciphertext),
-          input.ciphertext.byteLength,
-          input.passwordHash ?? null,
-          input.expiresAt,
-        ],
-      );
-      await client.query(
-        `INSERT INTO note_create_idempotency
+          [
+            input.id,
+            Buffer.from(input.iv),
+            Buffer.from(input.ciphertext),
+            input.ciphertext.byteLength,
+            input.passwordHash ?? null,
+            input.expiresAt,
+          ],
+        );
+        await client.query(
+          `INSERT INTO note_create_idempotency
            (key_digest, request_fingerprint, note_id_digest, response_expires_at, surface)
          VALUES ($1, $2, $3, $4, $5)`,
-        [
-          Buffer.from(input.keyDigest),
-          Buffer.from(input.fingerprint),
-          Buffer.from(input.noteIdDigest),
-          input.expiresAt,
-          input.surface,
-        ],
-      );
-      await client.query(
-        `UPDATE note_capacity
+          [
+            Buffer.from(input.keyDigest),
+            fingerprintHash,
+            Buffer.from(input.noteIdDigest),
+            input.expiresAt,
+            input.surface,
+          ],
+        );
+        await client.query(
+          `UPDATE note_capacity
          SET active_note_count = active_note_count + 1,
              active_payload_bytes = active_payload_bytes + $1,
-             updated_at = now()
+             retained_note_count = retained_note_count + 1,
+             updated_at = clock_timestamp()
          WHERE id = 1`,
-        [input.ciphertext.byteLength],
-      );
-      return { kind: "created", id: input.id, expiresAt: input.expiresAt };
-    });
+          [input.ciphertext.byteLength],
+        );
+        return { kind: "created", id: input.id, expiresAt: input.expiresAt };
+      },
+    );
+    return result.kind === "verify-replay"
+      ? verifyReplay(input, result)
+      : result;
   }
 
   async metadata(id: string): Promise<{ requiresPassword: boolean } | null> {
@@ -494,21 +558,21 @@ class PostgresNoteStore implements NoteStoreBackend {
         `DELETE FROM notes
          WHERE id = $1
            AND password_hash IS NULL
-           AND (expires_at IS NULL OR expires_at > now())
+           AND (expires_at IS NULL OR expires_at > clock_timestamp())
          RETURNING protocol_version, id, iv, ciphertext, payload_bytes`,
         [id],
       );
       if (!deleted.rowCount) return { kind: "unavailable" };
       const row = deleted.rows[0];
       await client.query(
-        "UPDATE note_create_idempotency SET note_deleted_at = now() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
+        "UPDATE note_create_idempotency SET note_deleted_at = clock_timestamp() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
         [Buffer.from(digest)],
       );
       await client.query(
         `UPDATE note_capacity
          SET active_note_count = active_note_count - 1,
              active_payload_bytes = active_payload_bytes - $1,
-             updated_at = now()
+             updated_at = clock_timestamp()
          WHERE id = 1`,
         [row.payload_bytes],
       );
@@ -561,21 +625,21 @@ class PostgresNoteStore implements NoteStoreBackend {
         `DELETE FROM notes
          WHERE id = $1
            AND password_hash = $2
-           AND (expires_at IS NULL OR expires_at > now())
+           AND (expires_at IS NULL OR expires_at > clock_timestamp())
          RETURNING protocol_version, id, iv, ciphertext, payload_bytes`,
         [id, candidate.passwordHash],
       );
       if (!deleted.rowCount) return { kind: "unavailable" };
       const row = deleted.rows[0];
       await client.query(
-        "UPDATE note_create_idempotency SET note_deleted_at = now() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
+        "UPDATE note_create_idempotency SET note_deleted_at = clock_timestamp() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
         [Buffer.from(digest)],
       );
       await client.query(
         `UPDATE note_capacity
          SET active_note_count = active_note_count - 1,
              active_payload_bytes = active_payload_bytes - $1,
-             updated_at = now()
+             updated_at = clock_timestamp()
          WHERE id = 1`,
         [row.payload_bytes],
       );
@@ -606,19 +670,19 @@ class PostgresNoteStore implements NoteStoreBackend {
         `DELETE FROM notes
          WHERE id IN (
            SELECT id FROM notes
-           WHERE expires_at IS NOT NULL AND expires_at <= now()
+           WHERE expires_at IS NOT NULL AND expires_at <= clock_timestamp()
            ORDER BY expires_at
            LIMIT $1
            FOR UPDATE SKIP LOCKED
          )
          RETURNING id, payload_bytes`,
-        [Math.max(1, Math.min(1000, Math.floor(limit)))],
+        [batchLimit(limit)],
       );
       let payloadBytes = 0;
       for (const row of deleted.rows) {
         payloadBytes += Number(row.payload_bytes);
         await client.query(
-          "UPDATE note_create_idempotency SET note_deleted_at = now() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
+          "UPDATE note_create_idempotency SET note_deleted_at = clock_timestamp() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
           [Buffer.from(noteIdDigest(row.id, getEnv().IDEMPOTENCY_HMAC_SECRET))],
         );
       }
@@ -627,7 +691,7 @@ class PostgresNoteStore implements NoteStoreBackend {
           `UPDATE note_capacity
            SET active_note_count = active_note_count - $1,
                active_payload_bytes = active_payload_bytes - $2,
-               updated_at = now()
+               updated_at = clock_timestamp()
            WHERE id = 1`,
           [deleted.rowCount, payloadBytes],
         );
@@ -636,14 +700,37 @@ class PostgresNoteStore implements NoteStoreBackend {
     });
   }
 
-  async cleanupTombstones(retentionDays: number): Promise<number> {
-    const result = await getPool().query(
-      `DELETE FROM note_create_idempotency
-       WHERE note_deleted_at IS NOT NULL
-         AND note_deleted_at < now() - ($1::text || ' days')::interval`,
-      [retentionDays],
-    );
-    return result.rowCount ?? 0;
+  async cleanupTombstones(retentionDays: number, limit = 100): Promise<number> {
+    assertRetentionDays(retentionDays);
+    return transaction(async (client) => {
+      const capacity = await client.query(
+        "SELECT id FROM note_capacity WHERE id = 1 FOR UPDATE",
+      );
+      if (capacity.rowCount !== 1)
+        throw new Error("Capacity ledger is not initialized");
+      const result = await client.query(
+        `DELETE FROM note_create_idempotency
+         WHERE key_digest IN (
+           SELECT key_digest FROM note_create_idempotency
+           WHERE note_deleted_at IS NOT NULL
+             AND note_deleted_at <= clock_timestamp() - ($1::double precision * interval '24 hours')
+           ORDER BY note_deleted_at, key_digest
+           LIMIT $2
+           FOR UPDATE SKIP LOCKED
+         )`,
+        [retentionDays, batchLimit(limit)],
+      );
+      const deleted = result.rowCount ?? 0;
+      if (deleted) {
+        await client.query(
+          `UPDATE note_capacity
+           SET retained_note_count = retained_note_count - $1, updated_at = clock_timestamp()
+           WHERE id = 1`,
+          [deleted],
+        );
+      }
+      return deleted;
+    });
   }
 
   async reconcile(): Promise<{
@@ -658,28 +745,35 @@ class PostgresNoteStore implements NoteStoreBackend {
         throw new Error("Capacity ledger is not initialized");
       const expired = await client.query<{ id: string }>(
         `DELETE FROM notes
-         WHERE expires_at IS NOT NULL AND expires_at <= now()
+         WHERE expires_at IS NOT NULL AND expires_at <= clock_timestamp()
          RETURNING id`,
       );
       for (const row of expired.rows) {
         await client.query(
-          "UPDATE note_create_idempotency SET note_deleted_at = now() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
+          "UPDATE note_create_idempotency SET note_deleted_at = clock_timestamp() WHERE note_id_digest = $1 AND note_deleted_at IS NULL",
           [Buffer.from(noteIdDigest(row.id, getEnv().IDEMPOTENCY_HMAC_SECRET))],
         );
       }
       const aggregate = await client.query<{
         active_note_count: string;
         active_payload_bytes: string;
+        retained_note_count: string;
       }>(
         `SELECT count(*)::bigint AS active_note_count,
-                coalesce(sum(payload_bytes), 0)::bigint AS active_payload_bytes
+                coalesce(sum(payload_bytes), 0)::bigint AS active_payload_bytes,
+                (SELECT count(*)::bigint FROM note_create_idempotency) AS retained_note_count
          FROM notes`,
       );
       const activeNoteCount = Number(aggregate.rows[0].active_note_count);
       const activePayloadBytes = Number(aggregate.rows[0].active_payload_bytes);
       await client.query(
-        `UPDATE note_capacity SET active_note_count = $1, active_payload_bytes = $2, updated_at = now() WHERE id = 1`,
-        [activeNoteCount, activePayloadBytes],
+        `UPDATE note_capacity SET active_note_count = $1, active_payload_bytes = $2,
+           retained_note_count = $3, updated_at = clock_timestamp() WHERE id = 1`,
+        [
+          aggregate.rows[0].active_note_count,
+          aggregate.rows[0].active_payload_bytes,
+          aggregate.rows[0].retained_note_count,
+        ],
       );
       return { activeNoteCount, activePayloadBytes };
     });
@@ -709,7 +803,7 @@ class PostgresNoteStore implements NoteStoreBackend {
     await transaction(async (client) => {
       await client.query("TRUNCATE notes, note_create_idempotency");
       await client.query(
-        "UPDATE note_capacity SET active_note_count = 0, active_payload_bytes = 0, updated_at = now() WHERE id = 1",
+        "UPDATE note_capacity SET active_note_count = 0, active_payload_bytes = 0, retained_note_count = 0, updated_at = clock_timestamp() WHERE id = 1",
       );
     });
   }
@@ -729,8 +823,8 @@ export const noteStore: NoteStoreBackend = {
   metadata: (id) => backend().metadata(id),
   consume: (id, password) => backend().consume(id, password),
   cleanupExpired: (limit) => backend().cleanupExpired(limit),
-  cleanupTombstones: (retentionDays) =>
-    backend().cleanupTombstones(retentionDays),
+  cleanupTombstones: (retentionDays, limit) =>
+    backend().cleanupTombstones(retentionDays, limit),
   reconcile: () => backend().reconcile(),
   stats: () => backend().stats(),
   resetForTests: () => backend().resetForTests(),

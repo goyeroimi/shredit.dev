@@ -47,11 +47,11 @@ const optionalString = z.preprocess(
 
 const publicContactUri = z
   .string()
-  .url()
   .refine(
     (value) => !/[\r\n]/u.test(value),
     "contact URI must be a single line",
   )
+  .url()
   .refine(
     (value) => ["https:", "mailto:"].includes(new URL(value).protocol),
     "contact URI must use https or mailto",
@@ -281,6 +281,9 @@ const envSchema = z.object({
   ONION_TOKEN_BYTES: integerFromEnv(8192),
   MAX_ACTIVE_NOTE_BYTES: safePositiveIntegerFromEnv,
   MAX_ACTIVE_NOTE_COUNT: safePositiveIntegerFromEnv,
+  MAX_RETAINED_NOTE_COUNT: safePositiveIntegerFromEnv.transform(
+    (value) => value ?? 1_000_000,
+  ),
   ARGON2_MEMORY_KIB: integerFromEnv(65536),
   ARGON2_TIME_COST: integerFromEnv(3),
   ARGON2_PARALLELISM: integerFromEnv(1),

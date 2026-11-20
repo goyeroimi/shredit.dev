@@ -220,6 +220,36 @@ describe("note API integration", () => {
     });
   });
 
+  it("retains exact replay after consumption and rejects changed passwords at the retained limit", async () => {
+    vi.stubEnv("MAX_RETAINED_NOTE_COUNT", "1");
+    resetEnvForTests();
+    const fixture = createFixture(40, { password: "original password" });
+    const created = await createNote(createRequest(fixture));
+    expect(created.status).toBe(201);
+    const original = await created.json();
+    expect(
+      (await open(fixture.body.id, { password: fixture.body.password })).status,
+    ).toBe(200);
+    const replay = await createNote(createRequest(fixture));
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("Idempotent-Replay")).toBe("true");
+    await expect(replay.json()).resolves.toEqual(original);
+    const changed = {
+      ...fixture,
+      body: { ...fixture.body, password: "different password" },
+    };
+    expect((await createNote(createRequest(changed))).status).toBe(409);
+    const omitted = { ...fixture, body: { ...fixture.body } };
+    delete omitted.body.password;
+    expect((await createNote(createRequest(omitted))).status).toBe(409);
+    expect((await createNote(createRequest(createFixture(41)))).status).toBe(
+      507,
+    );
+    expect(
+      (await open(fixture.body.id, { password: fixture.body.password })).status,
+    ).toBe(404);
+  });
+
   it("accepts the maximum 64 KiB plaintext ciphertext envelope", async () => {
     const fixture = createFixture(8, { ciphertextBytes: 65_552 });
     const response = await createNote(createRequest(fixture));

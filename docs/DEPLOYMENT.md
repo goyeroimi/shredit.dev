@@ -99,6 +99,40 @@ bounded batches. It must not silently remove unexpired notes to correct a capaci
 PostgreSQL backup and retention policy remain operator-owned; the application does not provision or
 manage backups.
 
+### Schema Version 2 Release Caveat
+
+Version 2 is not compatible with old application writers. Stop/drain old replicas and pause cleanup
+before running the release migration; do not attempt a rolling mixed-version upgrade. The migrator
+uses one transaction and a PostgreSQL advisory transaction lock to serialize migration jobs, then
+locks the note tables for conversion. Every legacy 32-byte request fingerprint, including retained
+tombstones, is converted to a salted Argon2id text encoding of its lowercase hex value. Read batches
+are capped at 100 and hashing is sequential through the bounded Argon2 pool. Plan maintenance time,
+transaction/WAL space, and database timeouts for the total retained row count, not only active notes.
+An error rolls back the conversion, constraints, retained ledger, and version marker together; retry
+with the same release after resolving the cause. Do not run `0000_initial.sql` manually on an upgraded
+database: the version-aware runner uses it only on a fresh database, skips completed version 2, and
+rejects unknown versions or an unversioned partial schema rather than downgrading them.
+
+The migration preserves IDs, encryption payloads, password hashes, response expiry, key/note-ID
+digests, and deletion timestamps. Exact retries for both active and consumed legacy notes still work;
+they never recreate a consumed payload. No application-visible fast fingerprint remains after commit.
+Old snapshots, dead tuples, WAL, replicas, or backups may still contain the former representation;
+this migration is not a forensic-erasure guarantee. Their lifecycle remains operator-owned. Do not
+restore old note data or retain a legacy fingerprint compatibility column as a rollback mechanism.
+The application must pass version-2 readiness (including Argon2id text and nonnegative retained-count
+constraints) and capacity reconciliation before traffic resumes. Rolling back to old writers is not
+supported after this schema change.
+
+`MAX_RETAINED_NOTE_COUNT` optionally sets the total active-plus-tombstone row budget (positive safe
+integer; default `1000000`). The migration initializes it from the complete idempotency table and does
+not prune historical rows to meet the configured budget. If existing retention already exceeds the
+limit, new keys receive `507` until eligible cleanup releases space or the operator raises the finite
+budget. Exact replay is still allowed. Tombstone cleanup defaults to 100 rows per invocation and is
+clamped to 1-1000; it preserves the entire configured retention period and never evicts active rows.
+Size the cleanup schedule and budget for admitted create volume; do not shorten retention merely to
+hide exhausted capacity. Fingerprint hashing and replay verification also share the configured Argon2
+concurrency/timeout budget with password gates.
+
 ## Health And Proxy Contract
 
 - `/health/live` is process liveness only and must not touch PostgreSQL or Valkey.

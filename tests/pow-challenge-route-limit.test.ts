@@ -8,7 +8,8 @@ const routeMocks = vi.hoisted(() => ({
   trustedIngressSurface: vi.fn(),
 }));
 
-vi.mock("@/lib/rate-limit/valkey", () => ({
+vi.mock("@/lib/rate-limit/valkey", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/rate-limit/valkey")>()),
   consumePowChallengeIssuanceLimit: routeMocks.consumePowChallengeIssuanceLimit,
 }));
 vi.mock("@/lib/anti-abuse/pow", () => ({
@@ -102,6 +103,76 @@ describe("PoW challenge issuance route limit", () => {
     expect(await responseCode(response)).toBe("RATE_LIMITED");
     expect(routeMocks.issuePowChallenge).not.toHaveBeenCalled();
   });
+
+  it.each([
+    { hourly: "2", daily: "20", retry: "3600" },
+    { hourly: "20", daily: "2", retry: "86400" },
+    { hourly: "2", daily: "2", retry: "86400" },
+  ])(
+    "allocates no IP or challenge state after real global saturation ($hourly/$daily)",
+    async ({ hourly, daily, retry }) => {
+      const valkey = await vi.importActual<
+        typeof import("@/lib/rate-limit/valkey")
+      >("@/lib/rate-limit/valkey");
+      const pow = await vi.importActual<typeof import("@/lib/anti-abuse/pow")>(
+        "@/lib/anti-abuse/pow",
+      );
+      vi.stubEnv("PUBLIC_BASE_URL", "http://127.0.0.1:3232");
+      vi.stubEnv("SHREDIT_LOCAL_EPHEMERAL", "true");
+      vi.stubEnv("IP_HASH_SECRET", "pow-route-test-ip-secret");
+      vi.stubEnv("IP_HASH_SECRET_PREVIOUS", "");
+      vi.stubEnv("ONION_TOKENS_PER_HOUR", hourly);
+      vi.stubEnv("ONION_TOKENS_PER_DAY", daily);
+      vi.stubEnv("ONION_TOKEN_BURST", "2");
+      resetEnvForTests();
+      valkey.resetEphemeralAntiAbuseState();
+      routeMocks.consumePowChallengeIssuanceLimit.mockImplementation(
+        valkey.consumePowChallengeIssuanceLimit,
+      );
+      routeMocks.issuePowChallenge.mockImplementation(pow.issuePowChallenge);
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(0);
+      try {
+        for (const ip of ["198.51.100.40", "198.51.100.41"]) {
+          routeMocks.trustedClientIp.mockReturnValue(ip);
+          expect((await createPowChallenge(challengeRequest())).status).toBe(
+            200,
+          );
+        }
+        const state = (
+          globalThis as typeof globalThis & {
+            __shreditEphemeralAntiAbuse: {
+              counters: Map<string, unknown>;
+              pow: Map<string, unknown>;
+            };
+          }
+        ).__shreditEphemeralAntiAbuse;
+        expect(state.counters.size).toBe(4);
+        expect(state.pow.size).toBe(2);
+        const before = structuredClone({
+          counters: state.counters,
+          pow: state.pow,
+        });
+        vi.stubEnv("IP_HASH_SECRET_PREVIOUS", "pow-route-test-ip-secret");
+        vi.stubEnv("IP_HASH_SECRET", "rotated-pow-route-test-ip-secret");
+        resetEnvForTests();
+
+        for (let index = 0; index < 100; index += 1) {
+          routeMocks.trustedClientIp.mockReturnValue(`203.0.113.${index + 1}`);
+          const response = await createPowChallenge(challengeRequest());
+          expect(response.status).toBe(429);
+          expect(response.headers.get("Retry-After")).toBe(retry);
+          expect(await responseCode(response)).toBe("RATE_LIMITED");
+        }
+        expect(state.counters).toEqual(before.counters);
+        expect(state.pow).toEqual(before.pow);
+        expect(routeMocks.issuePowChallenge).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+        valkey.resetEphemeralAntiAbuseState();
+      }
+    },
+  );
 
   it("fails closed on Valkey outage without creating a challenge", async () => {
     routeMocks.consumePowChallengeIssuanceLimit.mockRejectedValue(

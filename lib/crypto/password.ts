@@ -152,11 +152,19 @@ export function generatePassword(length = 20): string {
   return result.join("");
 }
 
+let argon2Module: Promise<typeof import("@node-rs/argon2")> | undefined;
+
+/** One lazy import shared by every operation; the module stays out of client bundles. */
+function loadArgon2(): Promise<typeof import("@node-rs/argon2")> {
+  argon2Module ??= import("@node-rs/argon2");
+  return argon2Module;
+}
+
 export async function hashPassword(password: string): Promise<string> {
   const env = getEnv();
   const normalized = assertPassword(password);
   return runArgon2Operation(async (signal) => {
-    const { hash } = await import("@node-rs/argon2");
+    const { hash } = await loadArgon2();
     return hash(
       normalized,
       {
@@ -177,7 +185,7 @@ export async function verifyPassword(
 ): Promise<boolean> {
   const normalized = assertPassword(password);
   return runArgon2Operation(async (signal) => {
-    const { verify } = await import("@node-rs/argon2");
+    const { verify } = await loadArgon2();
     return verify(encodedHash, normalized, undefined, signal);
   });
 }

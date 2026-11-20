@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { issuePowChallenge, verifyPowSolution } from "@/lib/anti-abuse/pow";
 import { resetEnvForTests } from "@/lib/config/env";
 import { decodeBase64Url, encodeBase64Url } from "@/lib/crypto/base64url";
@@ -90,6 +90,7 @@ beforeEach(() => {
 });
 
 afterEach(async () => {
+  vi.useRealTimers();
   await closeValkey();
   for (const key of ENV_KEYS) {
     const value = originalEnv.get(key);
@@ -308,6 +309,232 @@ describe("Valkey anti-abuse policy", () => {
     ]);
     expect(maximumActive).toBe(2);
   });
+});
+
+describe("PoW issuance accounting", () => {
+  const hourKey = "shredit:{anti-abuse}:v1:rl:pow-issuance:host-hour";
+  const dayKey = "shredit:{anti-abuse}:v1:rl:pow-issuance:host-day";
+
+  function counters() {
+    return (
+      globalThis as typeof globalThis & {
+        __shreditEphemeralAntiAbuse: {
+          counters: Map<string, { value: number; expiresAtMs: number }>;
+        };
+      }
+    ).__shreditEphemeralAntiAbuse.counters;
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(0);
+  });
+
+  it("does not let repeated source denials consume either global window", async () => {
+    configureEphemeral({
+      ONION_TOKENS_PER_HOUR: "4",
+      ONION_TOKENS_PER_DAY: "5",
+    });
+    for (let index = 0; index < 2; index += 1) {
+      await expect(
+        consumePowChallengeIssuanceLimit("198.51.100.20"),
+      ).resolves.toEqual({
+        allowed: true,
+        retryAfterSeconds: 0,
+        remaining: 1 - index,
+        cost: 1,
+      });
+    }
+    const hostHour = { ...counters().get(hourKey)! };
+    const hostDay = { ...counters().get(dayKey)! };
+
+    vi.setSystemTime(60_000);
+    const denials = await Promise.all(
+      Array.from({ length: 100 }, () =>
+        consumePowChallengeIssuanceLimit("198.51.100.20"),
+      ),
+    );
+    for (const denial of denials) {
+      expect(denial).toEqual({
+        allowed: false,
+        retryAfterSeconds: 60,
+        remaining: 0,
+        cost: 1,
+      });
+    }
+    expect(counters().get(hourKey)).toEqual(hostHour);
+    expect(counters().get(dayKey)).toEqual(hostDay);
+
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.21"),
+    ).resolves.toMatchObject({ allowed: true, remaining: 1 });
+    vi.setSystemTime(119_999);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.20"),
+    ).resolves.toMatchObject({ allowed: false, retryAfterSeconds: 1 });
+    vi.setSystemTime(120_000);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.20"),
+    ).resolves.toMatchObject({ allowed: true, remaining: 0 });
+    expect(counters().get(hourKey)).toEqual({ ...hostHour, value: 4 });
+    expect(counters().get(dayKey)).toEqual({ ...hostDay, value: 4 });
+  });
+
+  it.each([
+    { hourly: "2", daily: "20", retry: 3_600 },
+    { hourly: "20", daily: "2", retry: 86_400 },
+    { hourly: "2", daily: "2", retry: 86_400 },
+  ])(
+    "does not allocate rotating source keys when globals are full ($hourly/$daily)",
+    async ({ hourly, daily, retry }) => {
+      configureEphemeral({
+        ONION_TOKENS_PER_HOUR: hourly,
+        ONION_TOKENS_PER_DAY: daily,
+      });
+      for (const ip of ["198.51.100.30", "198.51.100.31"]) {
+        await expect(
+          consumePowChallengeIssuanceLimit(ip),
+        ).resolves.toMatchObject({
+          allowed: true,
+        });
+      }
+      const before = structuredClone(counters());
+      process.env.IP_HASH_SECRET_PREVIOUS = process.env.IP_HASH_SECRET;
+      process.env.IP_HASH_SECRET = "rotated-pow-test-ip-secret";
+      resetEnvForTests();
+      vi.setSystemTime(1_000);
+
+      const denials = await Promise.all(
+        Array.from({ length: 100 }, (_, index) =>
+          consumePowChallengeIssuanceLimit(`203.0.113.${index + 1}`),
+        ),
+      );
+      for (const denial of denials) {
+        expect(denial).toEqual({
+          allowed: false,
+          retryAfterSeconds: retry - 1,
+          remaining: 0,
+          cost: 1,
+        });
+      }
+      expect(counters()).toEqual(before);
+    },
+  );
+
+  it("expires fixed host windows without restarting the hour while the day is full", async () => {
+    configureEphemeral({
+      ONION_TOKENS_PER_HOUR: "2",
+      ONION_TOKENS_PER_DAY: "3",
+      ONION_TOKEN_BURST: "1",
+    });
+    for (const ip of ["198.51.100.30", "198.51.100.31"]) {
+      await expect(consumePowChallengeIssuanceLimit(ip)).resolves.toMatchObject(
+        {
+          allowed: true,
+        },
+      );
+    }
+    vi.setSystemTime(3_599_999);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.32"),
+    ).resolves.toMatchObject({ allowed: false, retryAfterSeconds: 1 });
+    vi.setSystemTime(3_600_000);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.32"),
+    ).resolves.toMatchObject({ allowed: true, remaining: 0 });
+    expect(counters().get(hourKey)).toEqual({
+      value: 1,
+      expiresAtMs: 7_200_000,
+    });
+    expect(counters().get(dayKey)).toEqual({
+      value: 3,
+      expiresAtMs: 86_400_000,
+    });
+
+    vi.setSystemTime(7_200_000);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.33"),
+    ).resolves.toMatchObject({ allowed: false, retryAfterSeconds: 79_200 });
+    expect(counters().has(hourKey)).toBe(false);
+    expect(counters().get(dayKey)).toEqual({
+      value: 3,
+      expiresAtMs: 86_400_000,
+    });
+    vi.setSystemTime(86_400_000);
+    await expect(
+      consumePowChallengeIssuanceLimit("198.51.100.33"),
+    ).resolves.toMatchObject({
+      allowed: true,
+      retryAfterSeconds: 0,
+      remaining: 0,
+    });
+    expect(counters().get(hourKey)).toEqual({
+      value: 1,
+      expiresAtMs: 90_000_000,
+    });
+    expect(counters().get(dayKey)).toEqual({
+      value: 1,
+      expiresAtMs: 172_800_000,
+    });
+  });
+
+  it.each([
+    { previousAttempts: 2, activeAttempts: 1, activeAllowed: 0, retry: 60 },
+    { previousAttempts: 3, activeAttempts: 1, activeAllowed: 0, retry: 60 },
+    { previousAttempts: 3, activeAttempts: 3, activeAllowed: 0, retry: 120 },
+    { previousAttempts: 1, activeAttempts: 3, activeAllowed: 1, retry: 120 },
+  ])(
+    "preserves source rotation budgets and TTLs ($previousAttempts/$activeAttempts)",
+    async ({ previousAttempts, activeAttempts, activeAllowed, retry }) => {
+      const ip = "198.51.100.40";
+      for (let index = 0; index < previousAttempts; index += 1) {
+        await expect(
+          consumePowChallengeIssuanceLimit(ip),
+        ).resolves.toMatchObject({
+          allowed: index < 2,
+        });
+      }
+      vi.setSystemTime(60_000);
+      process.env.IP_HASH_SECRET_PREVIOUS = process.env.IP_HASH_SECRET;
+      process.env.IP_HASH_SECRET = "rotated-pow-test-ip-secret";
+      resetEnvForTests();
+      for (let index = 0; index < activeAttempts; index += 1) {
+        const decision = await consumePowChallengeIssuanceLimit(ip);
+        expect(decision.allowed).toBe(index < activeAllowed);
+        if (index === activeAttempts - 1) {
+          expect(decision).toMatchObject({
+            retryAfterSeconds: retry,
+            remaining: 0,
+          });
+        }
+      }
+      const allowed = Math.min(previousAttempts, 2) + activeAllowed;
+      expect(counters().get(hourKey)).toEqual({
+        value: allowed,
+        expiresAtMs: 3_600_000,
+      });
+      expect(counters().get(dayKey)).toEqual({
+        value: allowed,
+        expiresAtMs: 86_400_000,
+      });
+
+      vi.setSystemTime(120_000);
+      await expect(consumePowChallengeIssuanceLimit(ip)).resolves.toMatchObject(
+        {
+          allowed: activeAttempts < 2,
+          retryAfterSeconds: activeAttempts < 2 ? 0 : 60,
+        },
+      );
+      vi.setSystemTime(180_000);
+      await expect(consumePowChallengeIssuanceLimit(ip)).resolves.toMatchObject(
+        {
+          allowed: true,
+          retryAfterSeconds: 0,
+          remaining: 1,
+        },
+      );
+    },
+  );
 });
 
 describe("Valkey-backed proof of work", () => {

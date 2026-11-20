@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assertWebCryptoCapability,
@@ -7,6 +8,7 @@ import {
   toBase64Url,
 } from "@/lib/client-crypto";
 import {
+  classifyOpenNoteFailure,
   classifyPreparedRequestFailure,
   postOpenNoteAfterCryptoPreflight,
   preparedRequestAfterCreateFailure,
@@ -17,6 +19,41 @@ import {
 const NOTE_ID = toBase64Url(new Uint8Array(24).fill(7));
 const OTHER_NOTE_ID = toBase64Url(new Uint8Array(24).fill(8));
 const KEY = toBase64Url(new Uint8Array(32).fill(9));
+const uiSource = readFileSync(
+  new URL("../components/shredit-ui.tsx", import.meta.url),
+  "utf8",
+);
+
+function stubNoteWindow() {
+  const location = {
+    pathname: `/n/${NOTE_ID}`,
+    search: "",
+    hash: `#v1.${KEY}`,
+  };
+  const replaceState = vi.fn();
+  vi.stubGlobal("window", { location, history: { replaceState } });
+  return { location, replaceState };
+}
+
+function pauseCryptoPreflight() {
+  const realCrypto = globalThis.crypto;
+  let resume!: () => void;
+  const paused = new Promise<void>((resolve) => {
+    resume = resolve;
+  });
+  vi.stubGlobal("crypto", {
+    getRandomValues: realCrypto.getRandomValues.bind(realCrypto),
+    subtle: {
+      importKey: async (...args: Parameters<SubtleCrypto["importKey"]>) => {
+        await paused;
+        return realCrypto.subtle.importKey(...args);
+      },
+      encrypt: realCrypto.subtle.encrypt.bind(realCrypto.subtle),
+      decrypt: realCrypto.subtle.decrypt.bind(realCrypto.subtle),
+    },
+  });
+  return resume;
+}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -94,6 +131,286 @@ describe("destructive open preflight", () => {
       postOpenNoteAfterCryptoPreflight(NOTE_ID, "", fetcher),
     ).rejects.toThrow("crypto-unavailable");
     expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing fragment", `/n/${NOTE_ID}`, "", ""],
+    ["invalid fragment", `/n/${NOTE_ID}`, "", "#main-content"],
+    ["noncanonical key", `/n/${NOTE_ID}`, "", `#v1.${"_".repeat(43)}`],
+    ["query string", `/n/${NOTE_ID}`, "?source=preview", `#v1.${KEY}`],
+    ["different note", `/n/${OTHER_NOTE_ID}`, "", `#v1.${KEY}`],
+    ["different path", "/", "", `#v1.${KEY}`],
+  ])(
+    "never POSTs from a current %s",
+    async (_label, pathname, search, hash) => {
+      const { location } = stubNoteWindow();
+      Object.assign(location, { pathname, search, hash });
+      const fetcher = vi.fn();
+      await expect(
+        postOpenNoteAfterCryptoPreflight(NOTE_ID, "", fetcher),
+      ).rejects.toThrow("invalid-note-location");
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ["hash", ""],
+    ["hash", "#v1.invalid"],
+    ["search", "?unexpected=true"],
+    ["pathname", `/n/${OTHER_NOTE_ID}`],
+  ] as const)(
+    "rechecks %s after the crypto preflight awaits",
+    async (field, value) => {
+      const { location, replaceState } = stubNoteWindow();
+      const resume = pauseCryptoPreflight();
+      const fetcher = vi.fn();
+      const opening = postOpenNoteAfterCryptoPreflight(NOTE_ID, "", fetcher);
+      const rejected = expect(opening).rejects.toThrow("invalid-note-location");
+      expect(fetcher).not.toHaveBeenCalled();
+      location[field] = value;
+      resume();
+      await rejected;
+      expect(fetcher).not.toHaveBeenCalled();
+      expect(replaceState).not.toHaveBeenCalled();
+    },
+  );
+
+  it("uses a corrected valid key at POST time, not the mounted or later key", async () => {
+    const encrypted = await encryptNote(NOTE_ID, "corrected fragment");
+    const { location } = stubNoteWindow();
+    const resume = pauseCryptoPreflight();
+    const fetcher = vi.fn(async () => {
+      location.hash = `#v1.${KEY}`;
+      return Response.json({ id: NOTE_ID, protocolVersion: 1, ...encrypted });
+    });
+    const opening = postOpenNoteAfterCryptoPreflight(
+      NOTE_ID,
+      "e\u0301-password",
+      fetcher,
+    );
+    location.hash = `#v1.${encrypted.key}`;
+    resume();
+    const { response, key } = await opening;
+    expect(key).toBe(encrypted.key);
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith(
+      `/api/v1/notes/${NOTE_ID}/open`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "\u00e9-password" }),
+        cache: "no-store",
+      },
+    );
+    const payload = await response.json();
+    await expect(
+      decryptNote(NOTE_ID, key, payload.iv, payload.ciphertext),
+    ).resolves.toBe("corrected fragment");
+  });
+
+  it.each([400, 401, 403, 408, 409, 410, 422, 429, 500, 502, 503, 504])(
+    "retains the fragment for retry after HTTP %i",
+    async (status) => {
+      const encrypted = await encryptNote(NOTE_ID, "retry plaintext");
+      const { location, replaceState } = stubNoteWindow();
+      location.hash = `#v1.${encrypted.key}`;
+      const fetcher = vi
+        .fn()
+        .mockResolvedValueOnce(new Response(null, { status }))
+        .mockResolvedValueOnce(Response.json(encrypted));
+      const first = await postOpenNoteAfterCryptoPreflight(
+        NOTE_ID,
+        "",
+        fetcher,
+      );
+      expect(classifyOpenNoteFailure(first.response.status, false).state).toBe(
+        "transport",
+      );
+      expect(location.hash).toBe(`#v1.${encrypted.key}`);
+      expect(replaceState).not.toHaveBeenCalled();
+      const retry = await postOpenNoteAfterCryptoPreflight(
+        NOTE_ID,
+        "",
+        fetcher,
+      );
+      const payload = await retry.response.json();
+      await expect(
+        decryptNote(NOTE_ID, retry.key, payload.iv, payload.ciphertext),
+      ).resolves.toBe("retry plaintext");
+    },
+  );
+
+  it("retains the key after a transport error and permits a later retry", async () => {
+    const { location, replaceState } = stubNoteWindow();
+    const fetcher = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce(new Response());
+    await expect(
+      postOpenNoteAfterCryptoPreflight(NOTE_ID, "", fetcher),
+    ).rejects.toThrow();
+    expect(location.hash).toBe(`#v1.${KEY}`);
+    expect(replaceState).not.toHaveBeenCalled();
+    await expect(
+      postOpenNoteAfterCryptoPreflight(NOTE_ID, "", fetcher),
+    ).resolves.toMatchObject({ key: KEY });
+  });
+});
+
+describe("open response authority", () => {
+  it("treats every unrecognized HTTP failure as retryable", () => {
+    for (let status = 300; status <= 599; status += 1) {
+      if (status === 404 || status === 429) continue;
+      for (const requiresPassword of [false, true]) {
+        expect(classifyOpenNoteFailure(status, requiresPassword)).toEqual({
+          state: "transport",
+          errorKey: "serviceUnavailable",
+        });
+      }
+    }
+  });
+
+  it("requires authoritative metadata before clearing a protected 404", () => {
+    expect(classifyOpenNoteFailure(404, false)).toEqual({
+      state: "unavailable",
+      errorKey: null,
+    });
+    expect(classifyOpenNoteFailure(404, true, { kind: "unavailable" })).toEqual(
+      {
+        state: "unavailable",
+        errorKey: null,
+      },
+    );
+    expect(
+      classifyOpenNoteFailure(404, true, {
+        kind: "ready",
+        requiresPassword: true,
+      }),
+    ).toEqual({
+      state: "wrong",
+      errorKey: "wrongPassword",
+    });
+    for (const meta of [
+      undefined,
+      { kind: "retry" },
+      { kind: "ready", requiresPassword: false },
+    ] as const) {
+      expect(classifyOpenNoteFailure(404, true, meta)).toEqual({
+        state: "transport",
+        errorKey: "serviceUnavailable",
+      });
+    }
+  });
+
+  it("preserves the existing rate-limit feedback for both gates", () => {
+    expect(classifyOpenNoteFailure(429, true)).toEqual({
+      state: "wrong",
+      errorKey: "tooManyAttempts",
+    });
+    expect(classifyOpenNoteFailure(429, false)).toEqual({
+      state: "transport",
+      errorKey: "tooManyAttempts",
+    });
+  });
+});
+
+describe("client lifecycle source guards", () => {
+  const composer = uiSource.slice(
+    uiSource.indexOf("export function NoteComposer("),
+    uiSource.indexOf("function ShareLinkRow("),
+  );
+  const opener = uiSource.slice(
+    uiSource.indexOf("export function OpenNoteGate("),
+    uiSource.indexOf("export function TorLink("),
+  );
+
+  it("locks every payload control throughout encryption, PoW, creation and prepared retries", () => {
+    expect(composer).toMatch(
+      /const requestLocked =\s*prepared !== null \|\|\s*status === "encrypting" \|\|\s*status === "pow" \|\|\s*status === "creating"/u,
+    );
+    for (const marker of [
+      "<textarea",
+      "<ExpirySelect",
+      'id="password-toggle"',
+      "<PasswordControl",
+    ]) {
+      const control = composer.slice(composer.indexOf(marker));
+      expect(control.slice(0, control.indexOf("disabled=") + 80)).toContain(
+        "disabled={requestLocked",
+      );
+    }
+  });
+
+  it("captures one payload snapshot before awaiting and reuses it on collision", () => {
+    const prepare = composer.slice(
+      composer.indexOf("async function prepareRequest("),
+      composer.indexOf("async function submit("),
+    );
+    expect(prepare).toContain("const { text, password, expiry } = snapshot;");
+    expect(prepare).not.toContain("passwordEnabled");
+    expect(prepare.indexOf("= snapshot;")).toBeLessThan(
+      prepare.indexOf("await encryptNote"),
+    );
+    const submit = composer.slice(
+      composer.indexOf("async function submit("),
+      composer.indexOf("function startOver("),
+    );
+    expect(submit).toMatch(
+      /const snapshot = \{\s*text,\s*password: passwordEnabled \? normalizePassword\(password\) : undefined,\s*expiry,\s*\};/u,
+    );
+    expect(submit.indexOf("const snapshot =")).toBeLessThan(
+      submit.indexOf("await "),
+    );
+    expect(submit.match(/await prepareRequest\(snapshot\)/gu)).toHaveLength(2);
+    expect(submit).not.toContain("prepareRequest()");
+  });
+
+  it("guards duplicate submissions synchronously and unlocks retryable failures in finally", () => {
+    for (const [source, lock, firstAwait] of [
+      [composer, "submitLockedRef", "request = await prepareRequest(snapshot)"],
+      [
+        opener,
+        "openLockedRef",
+        "const { response, key } = await postOpenNoteAfterCryptoPreflight",
+      ],
+    ]) {
+      expect(source).toContain(`const ${lock} = useRef(false)`);
+      expect(source).toMatch(new RegExp(`if \\(\\s*${lock}\\.current`));
+      expect(source.indexOf(`${lock}.current = true`)).toBeLessThan(
+        source.indexOf(firstAwait),
+      );
+      expect(source).toMatch(
+        new RegExp(`finally \\{[\\s\\S]*?${lock}\\.current = false`),
+      );
+    }
+    expect(composer).toContain(
+      "if (!succeeded) submitLockedRef.current = false;",
+    );
+    expect(opener).toContain(
+      "if (!consumed && !unavailable) openLockedRef.current = false;",
+    );
+    expect(composer).toMatch(
+      /function startOver\(\) \{\s*if \(submitLockedRef.current\) return;/u,
+    );
+  });
+
+  it("clears only confirmed unavailable or consumed notes, never state-driven unknown failures", () => {
+    expect(opener).not.toContain("setKey");
+    expect(opener).toContain(
+      'if (meta.kind === "unavailable") clearNoteFragment(id);',
+    );
+    expect(opener).toContain('unavailable = failure.state === "unavailable";');
+    expect(opener).toContain("if (unavailable) clearNoteFragment(noteId);");
+    expect(opener).toMatch(
+      /consumed = true;\s*clearNoteFragment\(noteId\);\s*setPassword\(""\);\s*const payload = await response.json/u,
+    );
+    expect(opener).toMatch(
+      /const plaintext = await decryptNote\(\s*noteId,\s*key,/u,
+    );
+    const clear = uiSource.slice(
+      uiSource.indexOf("function clearNoteFragment("),
+      uiSource.indexOf("type CreationResult"),
+    );
+    expect(clear).toContain("if (window.location.pathname === `/n/${noteId}`)");
   });
 });
 

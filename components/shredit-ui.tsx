@@ -52,9 +52,15 @@ type ComposerErrorKey =
 
 type OpenErrorKey =
   | "cryptoUnavailable"
+  | "invalidLink"
   | "serviceUnavailable"
   | "tooManyAttempts"
   | "wrongPassword";
+
+type NoteMeta =
+  | { kind: "ready"; requiresPassword: boolean }
+  | { kind: "unavailable" }
+  | { kind: "retry" };
 
 function useCopy(locale: Locale) {
   return messages[locale] as CopyType;
@@ -589,7 +595,15 @@ export async function postOpenNoteAfterCryptoPreflight(
   fetcher: Fetcher = fetch,
 ) {
   await assertWebCryptoCapability();
-  return fetcher(`/api/v1/notes/${noteId}/open`, {
+  // Read after the asynchronous preflight, with no await before the POST.
+  const current = parseNoteLocation(
+    window.location.pathname,
+    window.location.search,
+    window.location.hash,
+  );
+  if (!current || current.id !== noteId)
+    throw new Error("invalid-note-location");
+  const response = await fetcher(`/api/v1/notes/${noteId}/open`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(
@@ -597,6 +611,39 @@ export async function postOpenNoteAfterCryptoPreflight(
     ),
     cache: "no-store",
   });
+  return { response, key: current.key };
+}
+
+export function classifyOpenNoteFailure(
+  status: number,
+  requiresPassword: boolean,
+  meta?: NoteMeta,
+): {
+  state: "wrong" | "transport" | "unavailable";
+  errorKey: OpenErrorKey | null;
+} {
+  if (status === 429)
+    return {
+      state: requiresPassword ? "wrong" : "transport",
+      errorKey: "tooManyAttempts",
+    };
+  if (status === 404) {
+    if (!requiresPassword || meta?.kind === "unavailable")
+      return { state: "unavailable", errorKey: null };
+    if (meta?.kind === "ready" && meta.requiresPassword)
+      return { state: "wrong", errorKey: "wrongPassword" };
+  }
+  return { state: "transport", errorKey: "serviceUnavailable" };
+}
+
+function clearNoteFragment(noteId: string) {
+  // A completed request must not overwrite navigation to another note.
+  if (window.location.pathname === `/n/${noteId}`)
+    window.history.replaceState(
+      window.history.state,
+      "",
+      window.location.pathname + window.location.search,
+    );
 }
 
 type CreationResult = {
@@ -639,6 +686,7 @@ export function NoteComposer({
   const [powAttempts, setPowAttempts] = useState(0);
   const [cryptoAvailable, setCryptoAvailable] = useState<boolean | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const submitLockedRef = useRef(false);
   const error = errorKey ? copy[errorKey] : "";
 
   useEffect(() => {
@@ -763,33 +811,37 @@ export function NoteComposer({
     return { ...request, body, antiAbuseRefreshRequired: false };
   }
 
-  async function prepareRequest(): Promise<PreparedRequest> {
+  async function prepareRequest(
+    snapshot: Readonly<{
+      text: string;
+      password?: string;
+      expiry: Expiry;
+    }>,
+  ): Promise<PreparedRequest> {
     if (!antiAbusePolicy) throw new Error("antiAbuseUnavailable");
+    const { text, password, expiry } = snapshot;
     const id = randomBase64Url(24);
     const encrypted = await encryptNote(id, text);
-    const normalizedPassword = passwordEnabled
-      ? normalizePassword(password)
-      : undefined;
     return attachAntiAbuseProof({
       idempotencyKey: randomBase64Url(24),
       id,
       key: encrypted.key,
-      password: normalizedPassword,
+      password,
       body: {
         id,
         protocolVersion: 1,
         iv: encrypted.iv,
         ciphertext: encrypted.ciphertext,
         expiresIn: expiry,
-        ...(normalizedPassword ? { password: normalizedPassword } : {}),
+        ...(password ? { password } : {}),
       },
     });
   }
 
   async function submit(event?: React.FormEvent) {
     event?.preventDefault();
+    if (submitLockedRef.current || status === "success") return;
     setErrorKey(null);
-    if (status === "success") return;
     if (!prepared && !canSubmit) {
       if (!text) setErrorKey("generic");
       else if (utf8ByteLength(text) > MAX_NOTE_PLAINTEXT_BYTES)
@@ -797,12 +849,19 @@ export function NoteComposer({
       else setErrorKey("passwordRequirements");
       return;
     }
+    submitLockedRef.current = true;
+    const snapshot = {
+      text,
+      password: passwordEnabled ? normalizePassword(password) : undefined,
+      expiry,
+    };
     let request = prepared;
     let createPostStarted = false;
+    let succeeded = false;
     try {
+      setStatus("encrypting");
       if (!request) {
-        setStatus("encrypting");
-        request = await prepareRequest();
+        request = await prepareRequest(snapshot);
         setPrepared(request);
       } else if (request.antiAbuseRefreshRequired) {
         request = await attachAntiAbuseProof(request);
@@ -841,7 +900,7 @@ export function NoteComposer({
           collisionRetries += 1;
           setPrepared(null);
           setStatus("encrypting");
-          request = await prepareRequest();
+          request = await prepareRequest(snapshot);
           setPrepared(request);
           continue;
         }
@@ -888,6 +947,7 @@ export function NoteComposer({
         password: request.password,
         expiresAt,
       });
+      succeeded = true;
       setStatus("success");
       setPrepared(null);
     } catch (caught) {
@@ -931,10 +991,14 @@ export function NoteComposer({
           : "generic",
       );
       setStatus("error");
+    } finally {
+      // Keep successful submissions locked until the next composer is opened.
+      if (!succeeded) submitLockedRef.current = false;
     }
   }
 
   function startOver() {
+    if (submitLockedRef.current) return;
     setPrepared(null);
     setStatus("idle");
     setErrorKey(null);
@@ -949,6 +1013,7 @@ export function NoteComposer({
         locale={locale}
         result={result}
         onCreateAnother={() => {
+          submitLockedRef.current = false;
           setResult(null);
           setStatus("idle");
           setText("");
@@ -962,7 +1027,11 @@ export function NoteComposer({
     );
 
   const noteIsOverLimit = utf8ByteLength(text) > MAX_NOTE_PLAINTEXT_BYTES;
-  const requestLocked = prepared !== null;
+  const requestLocked =
+    prepared !== null ||
+    status === "encrypting" ||
+    status === "pow" ||
+    status === "creating";
   const emptyNoteHint = !prepared && text.length === 0 && status === "idle";
 
   return (
@@ -1540,20 +1609,14 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
   const [password, setPassword] = useState("");
   const [requiresPassword, setRequiresPassword] = useState(false);
   const [noteId, setNoteId] = useState<string | null>(null);
-  const [key, setKey] = useState<string | null>(null);
   const [noteText, setNoteText] = useState("");
   const [errorKey, setErrorKey] = useState<OpenErrorKey | null>(null);
   const headingRef = useRef<HTMLHeadingElement>(null);
   const passwordRef = useRef<HTMLInputElement>(null);
+  const openLockedRef = useRef(false);
   const error = errorKey ? copy[errorKey] : "";
 
-  async function getMeta(
-    id: string,
-  ): Promise<
-    | { kind: "ready"; requiresPassword: boolean }
-    | { kind: "unavailable" }
-    | { kind: "retry" }
-  > {
+  async function getMeta(id: string): Promise<NoteMeta> {
     try {
       const response = await fetch(`/api/v1/notes/${id}/meta`, {
         cache: "no-store",
@@ -1576,6 +1639,7 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
       setRequiresPassword(meta.requiresPassword);
       setState("ready");
     } else {
+      if (meta.kind === "unavailable") clearNoteFragment(id);
       setState(meta.kind === "unavailable" ? "unavailable" : "meta-error");
     }
   }
@@ -1591,16 +1655,8 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
       return;
     }
     setNoteId(parsed.id);
-    setKey(parsed.key);
     void loadMeta(parsed.id);
   }, []);
-
-  useEffect(() => {
-    if ((state === "unavailable" || state === "decrypt-failure") && noteId) {
-      window.history.replaceState(null, "", `/n/${noteId}`);
-      setKey(null);
-    }
-  }, [state, noteId]);
 
   useEffect(() => {
     if (state === "ready" || state === "wrong") {
@@ -1611,41 +1667,42 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
 
   async function open(event: React.FormEvent) {
     event.preventDefault();
-    if (!noteId || !key) return;
+    if (
+      openLockedRef.current ||
+      !noteId ||
+      !["ready", "wrong", "transport"].includes(state)
+    )
+      return;
+    openLockedRef.current = true;
     setErrorKey(null);
     setState("opening");
     let consumed = false;
+    let unavailable = false;
     try {
-      const response = await postOpenNoteAfterCryptoPreflight(noteId, password);
-      const payload = await response.json().catch(() => null);
+      const { response, key } = await postOpenNoteAfterCryptoPreflight(
+        noteId,
+        password,
+      );
       if (!response.ok) {
-        if (response.status === 429) {
-          setState(requiresPassword ? "wrong" : "transport");
-          setErrorKey("tooManyAttempts");
-          return;
-        }
-        if (response.status === 503) {
-          setState("transport");
-          setErrorKey("serviceUnavailable");
-          return;
-        }
-        if (response.status === 404 && requiresPassword) {
-          const meta = await getMeta(noteId);
-          if (meta.kind === "ready" && meta.requiresPassword) {
-            setState("wrong");
-            setErrorKey("wrongPassword");
-            return;
-          }
-          if (meta.kind === "retry") {
-            setState("transport");
-            setErrorKey("serviceUnavailable");
-            return;
-          }
-        }
-        setState("unavailable");
+        const meta =
+          response.status === 404 && requiresPassword
+            ? await getMeta(noteId)
+            : undefined;
+        const failure = classifyOpenNoteFailure(
+          response.status,
+          requiresPassword,
+          meta,
+        );
+        unavailable = failure.state === "unavailable";
+        if (unavailable) clearNoteFragment(noteId);
+        setState(failure.state);
+        setErrorKey(failure.errorKey);
         return;
       }
       consumed = true;
+      clearNoteFragment(noteId);
+      setPassword("");
+      const payload = await response.json().catch(() => null);
       if (
         payload?.protocolVersion !== 1 ||
         payload?.id !== noteId ||
@@ -1660,25 +1717,25 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
         payload.iv,
         payload.ciphertext,
       );
-      window.history.replaceState(null, "", `/n/${noteId}`);
-      setKey(null);
-      setPassword("");
       setNoteText(plaintext);
       setState("viewer");
     } catch (caught) {
       if (consumed) {
-        window.history.replaceState(null, "", `/n/${noteId}`);
-        setKey(null);
-        setPassword("");
         setState("decrypt-failure");
       } else {
         setState("transport");
         setErrorKey(
           caught instanceof Error && caught.message === "crypto-unavailable"
             ? "cryptoUnavailable"
-            : "serviceUnavailable",
+            : caught instanceof Error &&
+                caught.message === "invalid-note-location"
+              ? "invalidLink"
+              : "serviceUnavailable",
         );
       }
+    } finally {
+      // Retry unknown outcomes, but never submit again after a terminal result.
+      if (!consumed && !unavailable) openLockedRef.current = false;
     }
   }
 
@@ -1782,6 +1839,7 @@ export function OpenNoteGate({ locale }: { locale: Locale }) {
                   type="password"
                   autoComplete="current-password"
                   value={password}
+                  disabled={state === "opening"}
                   onChange={(event) => setPassword(event.target.value)}
                   placeholder={copy.passwordPlaceholder}
                   aria-invalid={state === "wrong" || passwordLengthInvalid}
@@ -1939,7 +1997,14 @@ export function ShreditShell({
   }, [locale]);
   return (
     <div className="site-shell">
-      <a className="skip-link" href="#main-content">
+      <a
+        className="skip-link"
+        href="#main-content"
+        onClick={(event) => {
+          event.preventDefault();
+          document.getElementById("main-content")?.focus();
+        }}
+      >
         {copy.skipToContent}
       </a>
       <header className="site-header">

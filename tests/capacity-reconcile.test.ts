@@ -50,7 +50,13 @@ describe("capacity reconciliation", () => {
         return { rows: [], rowCount: 1 };
       if (statement.includes("SELECT count(*)::bigint")) {
         return {
-          rows: [{ active_note_count: "2", active_payload_bytes: "64" }],
+          rows: [
+            {
+              active_note_count: "2",
+              active_payload_bytes: "64",
+              retained_note_count: "7",
+            },
+          ],
           rowCount: 1,
         };
       }
@@ -80,6 +86,16 @@ describe("capacity reconciliation", () => {
     expect(aggregateIndex).toBeGreaterThan(deleteIndex);
     expect(updateIndex).toBeGreaterThan(aggregateIndex);
     expect(statements[aggregateIndex]).not.toContain("expires_at");
+    expect(statements[aggregateIndex]).toContain(
+      "FROM note_create_idempotency",
+    );
+    expect(statements[deleteIndex]).toContain(
+      "expires_at <= clock_timestamp()",
+    );
+    expect(databaseMocks.query).toHaveBeenCalledWith(
+      expect.stringContaining("retained_note_count = $3"),
+      ["2", "64", "7"],
+    );
     expect(databaseMocks.query).toHaveBeenCalledWith(
       expect.stringContaining("UPDATE note_create_idempotency"),
       [expect.any(Buffer)],

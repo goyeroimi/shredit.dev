@@ -29,12 +29,12 @@
     "drizzle-orm": "^0.45.2",
     "ioredis": "^5.6.1",
     "lucide-react": "^0.468.0",
-    "next": "15.5.24",
+    "next": "15.5.29",
     "next-intl": "^4.1.0",
     "pg": "^8.16.0",
     "react": "19.2.7",
     "react-dom": "19.2.7",
-    "zod": "^3.25.76"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",
@@ -47,13 +47,16 @@
     "tailwindcss": "^3.4.17",
     "tsx": "^4.19.4",
     "typescript": "^5.8.3",
-    "vitest": "^3.2.4"
+    "vite": "7.3.8",
+    "vitest": "^4.1.12"
   },
   "pnpm": {
     "overrides": {
       "postcss": "8.5.23",
-      "sharp": "0.35.4",
-      "postcss>nanoid": "3.3.18"
+      "sharp": "0.35.5",
+      "postcss>nanoid": "3.3.18",
+      "source-map-js": "1.2.4",
+      "postcss-selector-parser": "6.1.6"
     }
   }
 }
